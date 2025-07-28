@@ -18,7 +18,7 @@ from params import *
 import matplotlib.pyplot as plt
 
 class CTPADataset(data.Dataset):
-    def __init__(self, root='.', target=None, mode="train", augmentation=False):
+    def __init__(self, root='.', target=None, mode="train", augmentation=False,cond_dim=256):
         if target is None and mode != "infer":
             raise(RuntimeError("both images and targets must be set if mode is not 'infer'"))
 
@@ -26,13 +26,14 @@ class CTPADataset(data.Dataset):
             self.data = pd.read_csv(root + target)
         self.mode = mode
         self.root = root
+        self.cond_dim = cond_dim
         self.VAE = True
         if not self.VAE:
-            self.cts = self.root + 'CTPA_preprocessed/'
+            self.cts = self.root + 'preprocessed_data/XRayCTPA/CTPA_256/'
         else:
-            self.cts = self.root + 'CTPA_vae_256/'
+            self.cts = self.root + 'preprocessed_data/XRayCTPA/CTPA_256/'
 
-        self.xrays = self.root + 'XRay_preprocessed/'
+        # self.xrays = self.root + 'preprocessed_data/XRayCTPA/XRay_preprocessed/'
         self.augmentation = augmentation
 
     def __len__(self):
@@ -41,7 +42,7 @@ class CTPADataset(data.Dataset):
     def __getitem__(self, idx):
         ct_accession = self.data.loc[idx, CT_ACCESSION_COL]
         # A constant xray scan to be used as a stub 
-        cxr_accession = '4015005309959'
+        # cxr_accession = '4015005309959'
         label = self.data.loc[idx, LABEL_COL]
         label = torch.tensor(label).type(torch.DoubleTensor)
         label = label.reshape(1)
@@ -62,9 +63,10 @@ class CTPADataset(data.Dataset):
             ctout = ctout.permute(0,3,1,2)
 
         # Load matching Xray 2D image
-        xray = torch.from_numpy(np.load(self.xrays + str(cxr_accession) + '.npy')).float()
+        # xray = torch.from_numpy(np.load(self.xrays + str(cxr_accession) + '.npy')).float().shape
+        xray = torch.zeros(self.cond_dim).float()
 
         if self.mode == "train" or self.mode == "test":
-            return {'ct': ctout, 'cxr': xray, 'target': label} 
+            return {'ct': ctout, 'cxr': xray, 'target': label}
         else: #if self.mode == "infer"
-            return {'ct': ctout, 'cxr': xray, 'ct_accession': ct_accession, 'cxr_accession': cxr_accession}
+            return {'ct': ctout, 'cxr': xray, 'ct_accession': ct_accession, 'cxr_accession': 'stub'}

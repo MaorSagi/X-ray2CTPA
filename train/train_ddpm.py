@@ -1,6 +1,6 @@
 from re import I
 from ddpm import Unet3D, GaussianDiffusion, Trainer
-from dataset import MRNetDataset, BRATSDataset
+# from dataset import MRNetDataset, BRATSDataset
 import argparse
 import hydra
 from omegaconf import DictConfig, OmegaConf, open_dict
@@ -46,7 +46,7 @@ def run(cfg: DictConfig):
         num_frames=cfg.model.diffusion_depth_size,
         channels=cfg.model.diffusion_num_channels,
         timesteps=cfg.model.timesteps,
-        img_cond = True,
+        img_cond = 'xray' in cfg.model.name_dataset.lower(),
         loss_type=cfg.model.loss_type,
         l1_weight = cfg.model.l1_weight,
         perceptual_weight = cfg.model.perceptual_weight,

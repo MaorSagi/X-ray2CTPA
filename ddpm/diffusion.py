@@ -35,6 +35,7 @@ import SimpleITK as sitk
 from PIL import Image
 import numpy as np
 import cv2
+# from ddpm.discriminator import Discriminator, ones_target, zeros_target
 # MONAI Generative 3D models
 from generative.losses import PatchAdversarialLoss, PerceptualLoss
 from generative.networks.nets import PatchDiscriminator
@@ -468,13 +469,16 @@ class Unet3D(nn.Module):
             nn.Linear(time_dim, time_dim)
         )
 
+        self.cond_dim = cond_dim
+
         # image conditioning
         if cond_dim is not None:
             SEQ_LENGTH = 257
             CLIP_VISION_SIZE = 1024
 
             if not self.medclip:
-                self.fc_cond = nn.Linear(SEQ_LENGTH*CLIP_VISION_SIZE, CLIP_VISION_SIZE)
+                pass
+                # self.fc_cond = nn.Linear(SEQ_LENGTH*CLIP_VISION_SIZE, CLIP_VISION_SIZE)
 
         # text conditioning
         self.has_cond = exists(cond_dim) or use_bert_text_cond
@@ -580,8 +584,8 @@ class Unet3D(nn.Module):
         t = self.time_mlp(time) if exists(self.time_mlp) else None
 
         if not self.medclip:
-            cond = self.fc_cond(cond.view(batch,-1)) if exists(self.fc_cond) else cond
-
+            #self.fc_cond(cond.view(batch,-1)) if exists(self.fc_cond) else cond
+            pass
         # classifier free guidance
         if self.has_cond:
             batch, device = x.shape[0], x.device
@@ -725,15 +729,26 @@ class GaussianDiffusion(nn.Module):
             self.vqgan.eval()
 
         if vae_ckpt is not None:
-            url = "https://huggingface.co/stabilityai/sd-vae-ft-mse-original/blob/main/vae-ft-mse-840000-ema-pruned.safetensors"  # can also be a local file
-            self.vae = AutoencoderKL.from_single_file(url).cuda()
+            local_path = "weights/vae-ft-mse-840000-ema-pruned.safetensors"
+            config_path = "weights/config.json"
+            self.vae = AutoencoderKL.from_single_file(local_path, local_files_only=True, config=config_path)
             self.vae.eval()
         if img_cond:
             if self.medclip:
                 model, preprocess = create_model_from_pretrained(('hf-hub:microsoft/BiomedCLIP-PubMedBERT_256-vit_base_patch16_224'))
                 self.xray_encoder = model
             else:
-                self.xray_encoder = CLIPVisionModel.from_pretrained('openai/clip-vit-large-patch14')
+                from ddpm.ChestXRayModel import ChestXRayModel
+                elixr_model = ChestXRayModel()
+                model_path = "pretrained_models/PE_ELIXR_XRAY_07042025_205844.pt"
+                pretrained = torch.load(model_path)
+                elixr_model.load_state_dict(pretrained, strict=False)
+                elixr_model.output_layer = nn.Identity()
+                elixr_model.softmax = nn.Identity()
+                elixr_model.eval()
+                self.xray_encoder = elixr_model
+
+                 # self.xray_encoder = CLIPVisionModel.from_pretrained('openai/clip-vit-large-patch14')
 
         betas = cosine_beta_schedule(timesteps)
         alphas = 1. - betas
@@ -795,12 +810,14 @@ class GaussianDiffusion(nn.Module):
         self.optimizerD = optim.Adam(params=self.netD.parameters(), lr=1e-4)
 
         # perceptual loss
+        # TODO: remove comment after downloading model weights
         self.perceptual_model = PerceptualLoss(spatial_dims=2, network_type="radimagenet_resnet50")
         self.perceptual_model.cuda()
 
-        # For class label conditionaing
-        self.text_encoder = CLIPTextModel.from_pretrained('openai/clip-vit-large-patch14')
-        self.tokenizer = CLIPTokenizer.from_pretrained('openai/clip-vit-large-patch14')
+        # TODO: Understand and remove comment if needed
+        # # For class label conditionaing
+        # self.text_encoder = CLIPTextModel.from_pretrained('openai/clip-vit-large-patch14')
+        # self.tokenizer = CLIPTokenizer.from_pretrained('openai/clip-vit-large-patch14')
 
         #Load classification model
         self.classifier = latent_network.LatentNetwork(
@@ -809,11 +826,12 @@ class GaussianDiffusion(nn.Module):
             sample_size=32,
             sample_duration=64)
 
-        self.classifier = self.classifier.cuda()
-        classifier_path = "./pretrained_models/classification_model_256.pth.tar"
-        pretrained = torch.load(classifier_path, weights_only=False)
+        # TODO: add the pretrained model file and remove comments
+        # self.classifier = self.classifier.cuda()
+        # classifier_path = "./pretrained_models/classification_model_256.pth.tar"
+        # pretrained = torch.load(classifier_path)
 
-        self.classifier.load_state_dict(pretrained, strict=False)
+        # self.classifier.load_state_dict(pretrained, strict=False)
         self.pos_weight = torch.cuda.FloatTensor([POS_WEIGHT]).cuda()
 
     def q_mean_variance(self, x_start, t):
@@ -897,13 +915,16 @@ class GaussianDiffusion(nn.Module):
                 cond = self.xray_encoder.encode_image(cond.to(device), normalize=True)
                 cond = cond.to(device)
             else:
-                cond = self.xray_encoder(cond.to(device))[0]
+                cond = self.xray_encoder(cond.to(device))#[0]
+                # cond.to(device)
 
             if self.cfg:
                 # when sampling the label is unknown class = 2
                 batch_size = cond.shape[0] if exists(cond) else batch_size
                 label = torch.full((batch_size, 1), 2).cuda()
                 cond = torch.cat((cond, label), dim=-1).cuda()
+        else:
+            cond = cond.cuda()
 
         batch_size = cond.shape[0] if exists(cond) else batch_size
         image_size = self.image_size
@@ -924,7 +945,9 @@ class GaussianDiffusion(nn.Module):
             gray_slice = []
             _sample = (((_sample + 1.0) / 2.0) * (self.max_val - self.min_val)) + self.min_val
             _sample = 1 / 0.18215 * _sample
+            # return_latents = True
 
+            # if not return_latents:
             for i in range(_sample.shape[2]):
                 with torch.no_grad():
                     slice = self.vae.decode(_sample[:,:,i,:,:], return_dict=False)[0]
@@ -1031,6 +1054,7 @@ class GaussianDiffusion(nn.Module):
                 cond = cond.to(device)
             else:
                 cond = self.xray_encoder(cond.to(device))[0]
+                # cond = cond.to(device)
 
         if self.cfg:
             random_n = torch.rand(1)
@@ -1273,14 +1297,14 @@ class Trainer(object):
         if val_dataset:
             self.val_ds = val_dataset
             val_dl = DataLoader(self.val_ds, batch_size=train_batch_size,
-                        shuffle=True, pin_memory=True, num_workers=num_workers, prefetch_factor=2)
+                        shuffle=True, pin_memory=True, num_workers=num_workers, prefetch_factor=1)
             self.val_dl = cycle(val_dl)
         else:
             assert folder is not None, 'Provide a folder path to the dataset'
             self.ds = Dataset(folder, image_size,
                               channels=channels, num_frames=num_frames)
         dl = DataLoader(self.ds, batch_size=train_batch_size,
-                        shuffle=True, pin_memory=True, num_workers=num_workers, prefetch_factor=2)
+                        shuffle=True, pin_memory=True, num_workers=num_workers, prefetch_factor=1)
 
         self.len_dataloader = len(dl)
         self.dl = cycle(dl)

@@ -22,8 +22,8 @@ def get_dataset(cfg):
         sampler = None
         return train_dataset, val_dataset, sampler
     if cfg.dataset.name == 'CTPA':
-        train_dataset = CTPADataset(root=cfg.dataset.root_dir, target=TRAIN_LABELS, mode="train", augmentation=True)
-        val_dataset = CTPADataset(root=cfg.dataset.root_dir, target=VALID_LABELS, mode="test", augmentation=True)
+        train_dataset = CTPADataset(root=cfg.dataset.root_dir, target=TRAIN_LABELS, mode="train", augmentation=True,cond_dim=cfg.model.cond_dim)
+        val_dataset = CTPADataset(root=cfg.dataset.root_dir, target=VALID_LABELS, mode="test", augmentation=True,cond_dim=cfg.model.cond_dim)
         sampler = None
         return train_dataset, val_dataset, sampler
     if cfg.dataset.name == 'RSPECT':

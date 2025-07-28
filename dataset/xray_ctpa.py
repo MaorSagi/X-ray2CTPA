@@ -22,13 +22,21 @@ class XrayCTPADataset(data.Dataset):
         if target is None and mode != "infer":
             raise(RuntimeError("both images and targets must be set if mode is not 'infer'"))
 
-        if target is not None:
-            self.data = pd.read_csv(root + target)
+
         self.mode = mode
         self.root = root
-        self.cts = self.root + 'CTPA_vae_256/'
+        self.cts = self.root + 'preprocessed_data/XRayCTPA/CTPA_256/'
 
-        self.xrays = self.root + 'XRay_preprocessed/'
+        self.xrays = self.root + 'preprocessed_data/XRayCTPA/XRay_preprocessed/'
+        if target is not None:
+            self.data = pd.read_csv(root + target)
+            cts_list = [ct.replace(".npy","") for ct in os.listdir(self.cts)]
+            xrays_list = [xr.replace(".npy","") for xr in os.listdir(self.xrays)]
+            self.data[CT_ACCESSION_COL] = self.data[CT_ACCESSION_COL].astype(int)
+            self.data = self.data[self.data[CT_ACCESSION_COL].isin(cts_list)]
+            self.data[XRAY_ACCESSION_COL] = self.data[XRAY_ACCESSION_COL].astype(int)
+            self.data = self.data[self.data[XRAY_ACCESSION_COL].isin(xrays_list)]
+            self.data = self.data.reset_index()
         self.augmentation = augmentation
         self.VAE = True
         self.text_label = False
