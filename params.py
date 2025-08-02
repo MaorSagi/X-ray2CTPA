@@ -18,14 +18,14 @@ CONTRAST_HU_STD = 0.19974   # Standard deviation of voxel values after normaliza
 # Dataset parameters
 POS_WEIGHT = (843 / 305)
 LABEL_COL = 'PE'
-CT_ACCESSION_COL = 'CT_Accession_number'
+CT_ACCESSION_COL = 'CT_sps_key'
 XRAY_ACCESSION_COL = 'cxr_Accession_number'
 LIDC_CT_ACCESSION_COL = 'Subject ID'
 DEVICE = "cuda"
 
-TRAIN_LABELS = "labels_csv/cross_validation_ct_xray/fold0/y_train.csv"
-TEST_LABELS =  "labels_csv/cross_validation_ct_xray/fold0/y_test.csv"
-VALID_LABELS =  "labels_csv/cross_validation_ct_xray/fold0/y_valid.csv"
+TRAIN_LABELS = r"D:\Maor\X-ray2CTPA\data\train.csv"
+TEST_LABELS =  r"D:\Maor\X-ray2CTPA\data\test.csv"
+VALID_LABELS =  r"D:\Maor\X-ray2CTPA\data\validation.csv"
 
 GEN_TRAIN_LABELS = "labels_csv/cross_validation_ct_generation/fold0/y_train.csv"
 GEN_TEST_LABELS =  "labels_csv/cross_validation_ct_generation/fold0/y_test.csv"

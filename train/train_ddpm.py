@@ -9,6 +9,10 @@ import torch
 import os
 from ddpm.unet import UNet
 from datetime import date
+import logging
+
+log = logging.getLogger(__name__)
+
 
 @hydra.main(config_path='../config', config_name='base_cfg', version_base=None)
 def run(cfg: DictConfig):
@@ -82,7 +86,7 @@ def run(cfg: DictConfig):
     )
 
     if cfg.model.load_milestone:
-        trainer.load(cfg.model.load_milestone, map_location='cuda:0')
+        trainer.load(cfg.model.load_milestone, map_location='cuda:'+str(cfg.model.gpus))
 
     trainer.train()
 

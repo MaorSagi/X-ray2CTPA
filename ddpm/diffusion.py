@@ -1,15 +1,14 @@
 "Largely taken and adapted from https://github.com/lucidrains/video-diffusion-pytorch"
-
 import math
 import copy
 import torch
 from torch import nn, einsum
 import torch.nn.functional as F
 from functools import partial
-
+from itertools import batched
 from torch.utils import data
 from pathlib import Path
-from torch.optim import Adam
+from torch.optim import Adam, AdamW
 import torch.optim as optim
 from torchvision import transforms as T, utils
 from torch.amp import autocast, GradScaler
@@ -26,11 +25,13 @@ from transformers import CLIPVisionModel, CLIPTextModel, CLIPTokenizer
 from open_clip import create_model_from_pretrained
 
 from torch.utils.data import Dataset, DataLoader
+
+from utils import append_row_to_csv
 from vq_gan_3d.model.vqgan import VQGAN
 from diffusers import AutoencoderKL
 
 import matplotlib.pyplot as plt
-#import wandb
+# import wandb
 import SimpleITK as sitk
 from PIL import Image
 import numpy as np
@@ -42,6 +43,10 @@ from generative.networks.nets import PatchDiscriminator
 from params import *
 from ddpm.classifier import latent_network
 from ddpm.lora import inject_trainable_lora
+import logging
+
+log = logging.getLogger(__name__)
+
 
 # Function to convert a color image tensor to grayscale using PIL
 def to_grayscale(tensor):
@@ -739,7 +744,10 @@ class GaussianDiffusion(nn.Module):
                 self.xray_encoder = model
             else:
                 from ddpm.ChestXRayModel import ChestXRayModel
-                elixr_model = ChestXRayModel()
+                if self.model.cond_dim == 256:
+                    elixr_model = ChestXRayModel()
+                else:
+                    elixr_model = ChestXRayModel(hidden_layer_sizes=[self.model.cond_dim])
                 model_path = "pretrained_models/PE_ELIXR_XRAY_07042025_205844.pt"
                 pretrained = torch.load(model_path)
                 elixr_model.load_state_dict(pretrained, strict=False)
@@ -822,9 +830,9 @@ class GaussianDiffusion(nn.Module):
         #Load classification model
         self.classifier = latent_network.LatentNetwork(
             num_classes=1,
-            num_channels = 4,
-            sample_size=32,
-            sample_duration=64)
+            num_channels=channels,
+            sample_size=image_size,
+            sample_duration=num_frames)
 
         # TODO: add the pretrained model file and remove comments
         # self.classifier = self.classifier.cuda()
@@ -896,13 +904,49 @@ class GaussianDiffusion(nn.Module):
         device = self.betas.device
 
         b = shape[0]
+        # Input noise, randn, as the ct input
         img = torch.randn(shape, device=device)
 
+        # sample T times (i is the timestamp)
         for i in tqdm(reversed(range(0, self.num_timesteps)), desc='sampling loop time step', total=self.num_timesteps):
             img = self.p_sample(img, torch.full(
                 (b,), i, device=device, dtype=torch.long), cond=cond, cond_scale=cond_scale)
 
         return img
+    #
+    # @torch.inference_mode()
+    # def predict(self, cond, cond_scale=1.0):
+    #     device = next(self.denoise_fn.parameters()).device
+    #
+    #     if is_list_str(cond):
+    #         cond = bert_embed(
+    #             tokenize(cond), return_cls_repr=self.text_use_bert_cls)
+    #         cond = cond.to(device)
+    #
+    #     if self.img_cond:
+    #         if self.medclip:
+    #             cond = self.xray_encoder.encode_image(cond.to(device), normalize=True)
+    #         else:
+    #             cond = self.xray_encoder(cond.to(device))[0]
+    #     else:
+    #         raise ValueError("Model not configured for img_cond")
+    #
+    #     if self.cfg:
+    #         batch_size = cond.shape[0]
+    #         label = torch.full((batch_size, 1), 2).to(device)
+    #         cond = torch.cat((cond, label), dim=-1)
+    #
+    #     shape = (cond.shape[0], self.channels, self.num_frames, self.image_size, self.image_size)
+    #     noisy = torch.randn(shape).to(device)
+    #     timesteps = torch.full((shape[0],), self.num_timesteps - 1, dtype=torch.long).to(device)
+    #
+    #     with torch.no_grad():
+    #         pred_noise = self.denoise_fn(noisy, timesteps, cond=cond)
+    #         x_recon = self.predict_start_from_noise(noisy, t=timesteps, noise=pred_noise)
+    #         logits = self.classifier(x_recon)
+    #         probs = torch.sigmoid(logits)
+    #     return probs
+
 
     @torch.inference_mode()
     def sample(self, cond=None, cond_scale=1., batch_size=16):
@@ -1113,7 +1157,7 @@ class GaussianDiffusion(nn.Module):
         else:
             raise NotImplementedError()
 
-        return loss
+        return {'total': loss, 'lpips_loss': lpips_loss, 'disc_loss': disc_loss, 'cls_loss': cls_loss}
 
     def forward(self, x, *args, **kwargs):
         ct = x['ct'].cuda()
@@ -1312,7 +1356,7 @@ class Trainer(object):
         assert len(
             self.ds) > 0, 'need to have at least 1 video to start training (although 1 is not great, try 100k)'
 
-        self.opt = Adam(diffusion_model.parameters(), lr=train_lr)
+        self.opt = AdamW(diffusion_model.parameters(), lr=train_lr, weight_decay=train_lr)
 
         self.step = 0
 
@@ -1345,6 +1389,7 @@ class Trainer(object):
         torch.save(data, str(self.results_folder / f'model-{milestone}.pt'))
 
     def load(self, milestone, map_location=None, **kwargs):
+        get_milestone_path = lambda milestone: str(self.results_folder / f'model-{milestone}.pt')
         if milestone == -1:
             all_milestones = [int(p.stem.split('-')[-1])
                               for p in Path(self.results_folder).glob('**/*.pt')]
@@ -1353,7 +1398,7 @@ class Trainer(object):
             milestone = max(all_milestones)
 
         if map_location:
-            data = torch.load(milestone, map_location=map_location)
+            data = torch.load(get_milestone_path(milestone), map_location=map_location)
         else:
             data = torch.load(milestone)
 
@@ -1380,29 +1425,33 @@ class Trainer(object):
         self.scaler.load_state_dict(data['scaler'])
 
     def train(
-        self,
-        prob_focus_present=0.,
-        focus_present_mask=None,
-        log_fn=noop
+            self,
+            prob_focus_present=0.,
+            focus_present_mask=None,
+            log_fn=log.info
     ):
         assert callable(log_fn)
         while self.step < self.train_num_steps:
             for i in range(self.gradient_accumulate_every):
                 data = next(self.dl)
+                # Amp = flag to use mixed precision (efficiency purposes)
                 with autocast('cuda', enabled=self.amp):
-                    loss = self.model(
+                    total_loss = self.model(
                         data,
                         prob_focus_present=prob_focus_present,
                         focus_present_mask=focus_present_mask
                     )
 
+                    loss = total_loss['total']
+
                     self.scaler.scale(
                         loss / self.gradient_accumulate_every).backward()
 
                 print(f'{self.step}: {loss.item()}')
-                #wandb.log({"loss": loss.item(), "step": self.step})
-            log = {'loss': loss.item()}
+                # wandb.log({"loss": loss.item(), "step": self.step})
+            log = {l: total_loss[l].item() for l in total_loss}
 
+            # Max grad norm to limit gradient explosion
             if exists(self.max_grad_norm):
                 self.scaler.unscale_(self.opt)
                 nn.utils.clip_grad_norm_(
@@ -1412,10 +1461,13 @@ class Trainer(object):
             self.scaler.update()
             self.opt.zero_grad()
 
+            # Use ema model, copy of diffusion model, regularization to learn flat optima for better generalizations
+            # https://www.reddit.com/r/MachineLearning/comments/ucflc2/d_understanding_the_use_of_ema_in_diffusion_models/
             if self.step % self.update_ema_every == 0:
                 self.step_ema()
 
             if self.step != 0 and self.step % self.save_and_sample_every == 0:
+                # Use only ema model during Inference
                 self.ema_model.eval()
 
                 with torch.no_grad():
@@ -1462,3 +1514,107 @@ class Trainer(object):
             self.step += 1
 
         print('training completed')
+
+#
+# class Sampler(object):
+#     def __init__(
+#             self,
+#             diffusion_model_milestone,
+#             map_location='cpu',
+#             batch_size=1,
+#             folder=None,
+#             dataset=None,
+#             results_folder='./results',
+#             num_sample_rows=1,
+#             num_workers=20,
+#     ):
+#         super().__init__()
+#
+#         self.load(diffusion_model_milestone, map_location=map_location)
+#
+#         # Use only ema model during Inference
+#         self.ema_model.eval()
+#
+#         if dataset:
+#             self.ds = dataset
+#
+#         dl = DataLoader(self.ds, batch_size=batch_size, pin_memory=True, num_workers=num_workers, prefetch_factor=1)
+#
+#         self.len_dataloader = len(dl)
+#         self.dl = cycle(dl)
+#         print(f'found {len(self.ds)} videos as gif files at {folder}')
+#         assert len(
+#             self.ds) > 0, 'need to have at least 1 video to start training (although 1 is not great, try 100k)'
+#         self.num_sample_rows = num_sample_rows
+#         self.results_folder = Path(results_folder)
+#         self.results_folder.mkdir(exist_ok=True, parents=True)
+#
+#     def load(self, milestone, map_location=None, **kwargs):
+#         get_milestone_path = lambda milestone: str(self.results_folder / f'model-{milestone}.pt')
+#         if milestone == -1:
+#             all_milestones = [int(p.stem.split('-')[-1])
+#                               for p in Path(self.results_folder).glob('**/*.pt')]
+#             assert len(
+#                 all_milestones) > 0, 'need to have at least one milestone to load from latest checkpoint (milestone == -1)'
+#             milestone = max(all_milestones)
+#
+#         if map_location:
+#             data = torch.load(get_milestone_path(milestone), map_location=map_location)
+#         else:
+#             data = torch.load(milestone)
+#
+#         # self.model.load_state_dict(data['model'], strict=False, **kwargs)
+#         self.ema_model.load_state_dict(data['ema'], strict=False, **kwargs)
+#
+#
+#     def generate(self,
+#               result_file_name,
+#               slices_to_extract: list[int],
+#               log_fn=log.info):
+#         assert callable(log_fn)
+#
+#         with torch.no_grad():
+#             num_samples = self.num_sample_rows ** 2
+#             batches = num_to_groups(num_samples, self.batch_size)
+#
+#             sampled_data = next(self.dl)
+#             xrays = sampled_data['cxr']
+#             all_videos_list = list(
+#                 map(lambda n: self.ema_model.sample(cond=xrays, batch_size=n), batches))
+#             all_videos_list = torch.cat(all_videos_list, dim=0)
+#
+#         all_videos_list = F.pad(all_videos_list, (2, 2, 2, 2))
+#
+#         one_gif = rearrange(
+#             all_videos_list, '(i j) c f h w -> c f (i h) (j w)', i=self.num_sample_rows)
+#         video_path = str(self.results_folder / str(f'{result_file_name}.gif'))
+#         video_tensor_to_gif(one_gif, video_path)
+#
+#         def extract_jpg(frame_idx):
+#             frame_idx_selected = frame_idx.reshape(
+#                 -1, 1, 1, 1, 1).repeat(1, C, 1, H, W)
+#             frames = torch.gather(
+#                 all_videos_list, 2, frame_idx_selected).squeeze(2)
+#
+#             path = str(self.results_folder /
+#                        f'sample-{result_file_name}-{'-'.join(map(str, frame_idx_batch))}.jpg')
+#             plt.figure(figsize=(50, 50))
+#             cols = 5
+#             for num, frame in enumerate(frames.cpu()):
+#                 plt.subplot(
+#                     math.ceil(len(frames) / cols), cols, num + 1)
+#                 plt.axis('off')
+#                 plt.imshow(frame[0], cmap='gray')
+#                 plt.savefig(path)
+#
+#         B, C, D, H, W = all_videos_list.shape
+#         if len(slices_to_extract) == 0:
+#             # Selects one random 2D image from each 3D Image
+#             frame_idx = torch.randint(0, D, [B]).cuda()
+#             extract_jpg(frame_idx)
+#
+#         for frame_idx_batch in batched(slices_to_extract, B):
+#             frame_idx = torch.tensor(frame_idx_batch).cuda()
+#             extract_jpg(frame_idx)
+#
+#     # def predict(self, volume):

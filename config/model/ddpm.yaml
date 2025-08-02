@@ -1,23 +1,25 @@
 vqgan_ckpt: null 
-vae_ckpt: null
+vae_ckpt: "weights/vae-ft-mse-840000-ema-pruned.safetensors"
 
-# Have to be derived from VQ-GAN Latent space dimensions
-diffusion_img_size: ???
-diffusion_depth_size: ???
-diffusion_num_channels: ???
-dim_mults: ???
+# Have to be derived from 3D-VQGAN / 2D-VAE Latent space dimensions
+diffusion_img_size: 32
+diffusion_depth_size: 128
+diffusion_num_channels: 4
+dim_mults: [1,2,4,8]
+
+
 results_folder: "./checkpoints/ddpm/"
-results_folder_postfix: ''
-load_milestone: False
-cond_dim: 256
+results_folder_postfix: 'lora_finetune-new'
+load_milestone: ''#'-1 #'-1, ''
+cond_dim: 512 # 512, 256
 
-batch_size: 40
-num_workers: 20
+batch_size: 2
+num_workers: 10
 logger: wandb
 objective: pred_x0
 save_and_sample_every: 1000
 denoising_fn: Unet3D
-train_lr: 1e-4
+train_lr: 1e-4 # 1e-4 unconditional 1e-5 conditional
 timesteps: 1000 # number of steps
 sampling_timesteps: 500 # number of sampling timesteps (using ddim for faster inference [see citation for ddim paper])
 loss_type: l1_lpips
@@ -30,8 +32,8 @@ max_grad_norm: 1.0
 gpus: 0
 l1_weight : 1.0
 perceptual_weight : 0.01
-discriminator_weight : 0.0 
-classification_weight: 0.0
+discriminator_weight : 0.001
+classification_weight: 0.08
 classifier_free_guidance: False
 lora: True
 lora_first: False
@@ -43,3 +45,8 @@ medclip: False
 name_dataset: RSPECT
 dataset_min_value: -8.749182 # min value of the dataset for normalization
 dataset_max_value: 8.710065  # max value of the dataset for normalization
+
+
+
+
+
