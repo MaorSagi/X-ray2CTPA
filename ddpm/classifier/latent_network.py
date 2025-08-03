@@ -26,5 +26,5 @@ class LatentNetwork(nn.Module):
                             sample_duration = self.sample_duration)
     def forward(self, x):
 
-        out, _ = self.base_model(x)
-        return out, out
+        out = self.base_model(x)
+        return out

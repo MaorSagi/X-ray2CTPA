@@ -1127,7 +1127,7 @@ class GaussianDiffusion(nn.Module):
         # Classification loss
         cls_loss = 0
         if self.classification_weight > 0:
-            output, _ = self.classifier(x_recon)
+            output = self.classifier(x_recon)
             cls_loss = F.binary_cross_entropy_with_logits(output, label, pos_weight=self.pos_weight)
             cls_loss = cls_loss * self.classification_weight
         # Perceptual loss

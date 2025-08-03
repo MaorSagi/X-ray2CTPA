@@ -211,4 +211,4 @@ class DenseNet(nn.Module):
             out, kernel_size=(last_duration, last_size, last_size)).view(
                 features.size(0), -1)
         out = self.classifier(out)
-        return out, 1
+        return out
