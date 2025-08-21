@@ -7,6 +7,7 @@ np.random.seed(0)
 import random
 random.seed(0)
 torch.backends.cudnn.benchmark = False
+import torch.nn.functional as F
 
 import torch.utils.data as data
 from glob import glob
@@ -48,6 +49,7 @@ class XrayCTPADataset(data.Dataset):
         ct_accession = self.data.loc[idx, CT_ACCESSION_COL]
         cxr_accession = self.data.loc[idx, XRAY_ACCESSION_COL]
         label = self.data.loc[idx, LABEL_COL]
+        # label = F.one_hot(label.view(-1).to(torch.int64), num_classes=2).to(torch.float32)
         if not self.text_label:
             label = torch.tensor(label).type(torch.DoubleTensor)
             label = label.reshape(1)

@@ -55,15 +55,20 @@ ckpt = torch.load(ckpt_path, map_location=device)
 model.load_state_dict(ckpt["model"], strict=False)
 
 # === Load or fake CXR ===
-cxr_path = "path/to/xray_input.npy"
-cxr = torch.from_numpy(np.load(cxr_path)).float().unsqueeze(0).to(device)  # [1, 1, H, W]
-
+# cxr_path = "path/to/xray_input.npy"
+# cxr = torch.from_numpy(np.load(cxr_path)).float().unsqueeze(0).to(device)  # [1, 1, H, W]
+# ecg = torch.
 # === Generate sample ===
-diffusion.eval()
-with torch.no_grad():
-    sample = diffusion.sample(cond=cxr, batch_size=1, cond_scale=1.0)  # shape: [1, 1, D, H, W]
+# diffusion.eval()
+# with torch.no_grad():
+#     sample = diffusion.sample(cond=cxr, batch_size=1, cond_scale=1.0)  # shape: [1, 1, D, H, W]
 
 # === Save output ===
-output_volume = sample[0, 0].cpu().numpy()
-sitk_image = sitk.GetImageFromArray(output_volume)
-sitk.WriteImage(sitk_image, "generated_ctpa.mha")  # or use np.save("ctpa.npy", output_volume)
+# output_volume = sample[0, 0].cpu().numpy()
+# sitk_image = sitk.GetImageFromArray(output_volume)
+# sitk.WriteImage(sitk_image, "generated_ctpa.mha")  # or use np.save("ctpa.npy", output_volume)
+
+# === Predict ===
+diffusion.eval()
+with torch.no_grad():
+    pred = diffusion.predict(cond=, batch_size=1, cond_scale=1.0)  # shape: [1, 1, D, H, W]

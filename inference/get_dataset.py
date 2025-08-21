@@ -1,4 +1,4 @@
-from dataset import LIDCDataset, XrayLIDCDataset, DEFAULTDataset, XrayCTPADataset, CTPADataset, RSPECTDataset
+from dataset import LIDCDataset, XrayLIDCDataset, DEFAULTDataset,ECGXrayCTPADataset, XrayCTPADataset, CTPADataset, RSPECTDataset
 from torch.utils.data import WeightedRandomSampler
 from params import TRAIN_LABELS, VALID_LABELS, RSPECT_TRAIN_LABELS, RSPECT_VALID_LABELS, LIDC_TRAIN_LABELS, LIDC_TEST_LABELS
 
@@ -17,8 +17,12 @@ def get_dataset(cfg):
         test_dataset = XrayCTPADataset(root=cfg.dataset.root_dir, target=VALID_LABELS, mode="test")
         sampler = None
         return test_dataset, sampler
+    if cfg.dataset.name == 'ECG_XRAY_CTPA':
+        test_dataset = ECGXrayCTPADataset(root=cfg.dataset.root_dir, target=VALID_LABELS, mode="test")
+        sampler = None
+        return test_dataset, sampler
     if cfg.dataset.name == 'CTPA':
-        test_dataset = CTPADataset(root=cfg.dataset.root_dir, target=VALID_LABELS, mode="test",cond_dim=cfg.model.cond_dim)
+        test_dataset = CTPADataset(root=cfg.dataset.root_dir, target=VALID_LABELS, mode="test",img_cond_dim=cfg.model.img_cond_dim, ecg_cond_dim=cfg.model.ecg_cond_dim)
         sampler = None
         return test_dataset, sampler
     if cfg.dataset.name == 'RSPECT':

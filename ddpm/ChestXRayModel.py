@@ -3,14 +3,6 @@ import torch.nn as nn
 import numpy as np
 class ChestXRayModel(nn.Module):
     def __init__(self, embeddings_size=1376, hidden_layer_sizes=[512,256], dropout=0.2):
-        """
-        Creates a lightweight classification model for chest X-ray embeddings.
-
-        Args:
-            embeddings_size: Size of embeddings per token (1376).
-            hidden_layer_sizes: List of hidden layer sizes.
-            dropout: Dropout rate for regularization.
-        """
         super(ChestXRayModel, self).__init__()
 
         self.embeddings_size = embeddings_size

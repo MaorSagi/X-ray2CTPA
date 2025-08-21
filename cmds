@@ -1,0 +1,7 @@
+sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
+set PYTHONPATH=%PYTHONPATH%;D:\Maor\X-ray2CTPA
+python D:/Maor/X-ray2CTPA/train/train_ddpm.py model=ddpm dataset=ctpa
+
+
+python D:/Maor/X-ray2CTPA/train/train_ddpm.py model=ddpm dataset=ecgxrayctpa
+l

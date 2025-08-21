@@ -2,6 +2,8 @@
 import math
 import copy
 import torch
+import time
+from more_itertools import unzip
 from torch import nn, einsum
 import torch.nn.functional as F
 from functools import partial
@@ -11,7 +13,7 @@ from pathlib import Path
 from torch.optim import Adam, AdamW
 import torch.optim as optim
 from torchvision import transforms as T, utils
-from torch.amp import autocast, GradScaler
+from torch.amp import GradScaler, autocast
 from PIL import Image
 
 from tqdm import tqdm
@@ -31,7 +33,7 @@ from vq_gan_3d.model.vqgan import VQGAN
 from diffusers import AutoencoderKL
 
 import matplotlib.pyplot as plt
-# import wandb
+import wandb
 import SimpleITK as sitk
 from PIL import Image
 import numpy as np
@@ -47,6 +49,24 @@ import logging
 
 log = logging.getLogger(__name__)
 
+
+def timer(start, end, msg='', log=print):
+    hours, rem = divmod(end - start, 3600)
+    minutes, seconds = divmod(rem, 60)
+    if LOG_TIME:
+        log(f"{msg}-"+"{:0>2}:{:0>2}:{:05.2f}".format(int(hours), int(minutes), seconds))
+
+def binary_accuracy(y_pred, y_true):
+    y_pred_labels = (y_pred > ACCURACY_THRESHOLD).int()
+    correct = (y_pred_labels == y_true.int()).sum().item()
+    accuracy = correct / y_true.numel()
+    return accuracy
+
+    # _, y_pred_tags = torch.max(y_pred, dim=1)
+    # _, y_test_tags = torch.max(y_true, dim=1)
+    # correct_results_sum = (y_pred_tags == y_test_tags).sum().float()
+    # acc = correct_results_sum / y_test.shape[0]
+    # acc = torch.round(acc * 100)
 
 # Function to convert a color image tensor to grayscale using PIL
 def to_grayscale(tensor):
@@ -692,6 +712,9 @@ class GaussianDiffusion(nn.Module):
         num_frames,
         text_use_bert_cls=False,
         img_cond = False,
+        img_cond_dim=0,
+        ecg_cond=False,
+        ecg_cond_dim=0,
         channels=3,
         timesteps=1000,
         loss_type='l1',
@@ -704,6 +727,7 @@ class GaussianDiffusion(nn.Module):
         perceptual_weight = 1.0,
         discriminator_weight = 0.0,
         classification_weight = 1.0,
+        generator_weight= 1.0,
         classifier_free_guidance = False,
         name_dataset = 'RSPECT',
         dataset_min_value = -5.1874175,
@@ -725,9 +749,22 @@ class GaussianDiffusion(nn.Module):
         self.l1_weight = l1_weight
         self.discriminator_weight = discriminator_weight
         self.classification_weight = classification_weight
+        self.generator_weight = generator_weight
         self.cfg = classifier_free_guidance
         self.max_val = dataset_max_value
         self.min_val = dataset_min_value
+
+        # text conditioning parameters
+        self.text_use_bert_cls = text_use_bert_cls
+
+        # image conditioning parameters
+        self.img_cond = img_cond
+        self.img_cond_dim = img_cond_dim
+
+
+        # signal conditioning parameters
+        self.ecg_cond = ecg_cond
+        self.ecg_cond_dim = ecg_cond_dim
 
         if vqgan_ckpt is not None:
             self.vqgan = VQGAN.load_from_checkpoint(vqgan_ckpt).cuda()
@@ -744,21 +781,51 @@ class GaussianDiffusion(nn.Module):
                 self.xray_encoder = model
             else:
                 from ddpm.ChestXRayModel import ChestXRayModel
-                if self.model.cond_dim == 256:
+                if self.img_cond_dim == 256:
                     elixr_model = ChestXRayModel()
                 else:
-                    elixr_model = ChestXRayModel(hidden_layer_sizes=[self.model.cond_dim])
+                    elixr_model = ChestXRayModel(hidden_layer_sizes=[self.img_cond_dim])
                 model_path = "pretrained_models/PE_ELIXR_XRAY_07042025_205844.pt"
                 pretrained = torch.load(model_path)
-                elixr_model.load_state_dict(pretrained, strict=False)
+                model_state_dict = elixr_model.state_dict()
+
+                # Filter out the mismatched layer(s)
+                for k, v in pretrained.items():
+                    if k in model_state_dict and model_state_dict[k].shape != v.shape:
+                        print(f"Skipping {k} due to shape mismatch.")
+                        continue
+                    model_state_dict[k] = v
+                elixr_model.load_state_dict(model_state_dict, strict=False)
                 elixr_model.output_layer = nn.Identity()
                 elixr_model.softmax = nn.Identity()
                 elixr_model.eval()
                 self.xray_encoder = elixr_model
 
                  # self.xray_encoder = CLIPVisionModel.from_pretrained('openai/clip-vit-large-patch14')
+        if ecg_cond:
+            from ddpm.ECGModel import ECGCNNModel
+            ecg_model = ECGCNNModel()
+            model_path = "pretrained_models/PE_ECG_2Iter_02052025_172021.pt"
+            pretrained = torch.load(model_path)
+            model_state_dict = ecg_model.state_dict()
+
+            # Filter out the mismatched layer(s)
+            for k, v in pretrained.items():
+                if k in model_state_dict and model_state_dict[k].shape != v.shape:
+                    print(f"Skipping {k} due to shape mismatch.")
+                    continue
+                model_state_dict[k] = v
+            ecg_model.load_state_dict(model_state_dict, strict=False)
+            ecg_model.fc2 = nn.Identity()
+            ecg_model.act1 = nn.Identity()
+            ecg_model.norm1D32 = nn.Identity()
+            ecg_model.fc3 = nn.Identity()
+            ecg_model.drop = nn.Identity()
+            ecg_model.softmax = nn.Linear(self.ecg_cond_dim, self.img_cond_dim)
+            self.ecg_encoder = ecg_model
 
         betas = cosine_beta_schedule(timesteps)
+
         alphas = 1. - betas
         alphas_cumprod = torch.cumprod(alphas, axis=0)
         alphas_cumprod_prev = F.pad(alphas_cumprod[:-1], (1, 0), value=1.)
@@ -801,11 +868,6 @@ class GaussianDiffusion(nn.Module):
         register_buffer('posterior_mean_coef2', (1. - alphas_cumprod_prev)
                         * torch.sqrt(alphas) / (1. - alphas_cumprod))
 
-        # text conditioning parameters
-        self.text_use_bert_cls = text_use_bert_cls
-
-        # image conditioning parameters
-        self.img_cond = img_cond
 
         # dynamic thresholding when sampling
         self.use_dynamic_thres = use_dynamic_thres
@@ -829,7 +891,7 @@ class GaussianDiffusion(nn.Module):
 
         #Load classification model
         self.classifier = latent_network.LatentNetwork(
-            num_classes=1,
+            num_classes=2,
             num_channels=channels,
             sample_size=image_size,
             sample_duration=num_frames)
@@ -913,40 +975,69 @@ class GaussianDiffusion(nn.Module):
                 (b,), i, device=device, dtype=torch.long), cond=cond, cond_scale=cond_scale)
 
         return img
-    #
-    # @torch.inference_mode()
-    # def predict(self, cond, cond_scale=1.0):
-    #     device = next(self.denoise_fn.parameters()).device
-    #
-    #     if is_list_str(cond):
-    #         cond = bert_embed(
-    #             tokenize(cond), return_cls_repr=self.text_use_bert_cls)
-    #         cond = cond.to(device)
-    #
-    #     if self.img_cond:
-    #         if self.medclip:
-    #             cond = self.xray_encoder.encode_image(cond.to(device), normalize=True)
-    #         else:
-    #             cond = self.xray_encoder(cond.to(device))[0]
-    #     else:
-    #         raise ValueError("Model not configured for img_cond")
-    #
-    #     if self.cfg:
-    #         batch_size = cond.shape[0]
-    #         label = torch.full((batch_size, 1), 2).to(device)
-    #         cond = torch.cat((cond, label), dim=-1)
-    #
-    #     shape = (cond.shape[0], self.channels, self.num_frames, self.image_size, self.image_size)
-    #     noisy = torch.randn(shape).to(device)
-    #     timesteps = torch.full((shape[0],), self.num_timesteps - 1, dtype=torch.long).to(device)
-    #
-    #     with torch.no_grad():
-    #         pred_noise = self.denoise_fn(noisy, timesteps, cond=cond)
-    #         x_recon = self.predict_start_from_noise(noisy, t=timesteps, noise=pred_noise)
-    #         logits = self.classifier(x_recon)
-    #         probs = torch.sigmoid(logits)
-    #     return probs
 
+    @torch.inference_mode()
+    def predict(self, cond, cond_scale=1.0):
+        breakpoint()
+        device = next(self.denoise_fn.parameters()).device
+
+        if is_list_str(cond):
+            cond = bert_embed(
+                tokenize(cond), return_cls_repr=self.text_use_bert_cls)
+            cond = cond.to(device)
+            ecg, cxr = None, None
+        elif isinstance(cond, list):
+            cxr, ecg = cond
+        else:
+            cxr = cond if self.img_cond else None
+            ecg = cond if self.ecg_cond else None
+
+        if self.img_cond:
+            if self.medclip:
+                cond = self.xray_encoder.encode_image(cxr.to(device), normalize=True)
+                cond = cond.to(device)
+            else:
+                cond = self.xray_encoder(cxr.to(device))#[0]
+                # cond.to(device)
+
+            if self.cfg:
+                # TODO: fix to apply on 2 conds (cxr, ecg) currently only if cxr
+                batch_size = cond.shape[0]
+                label = torch.full((batch_size, 1), 2).to(device)
+                cond = torch.cat((cond, label), dim=-1)
+
+        else:
+            cond = cond.cuda()
+        breakpoint()
+        if self.ecg_cond:
+            cond = self.add_ecg_to_cond(cond, device, ecg)
+
+        if isinstance(cond, list):
+            cond = cond[0]+F.pad(cond[1],(0, self.img_cond_dim - self.ecg_cond_dim))
+            cond = cond.cuda()
+        breakpoint()
+        shape = (cond.shape[0], self.channels, self.num_frames, self.image_size, self.image_size)
+        noisy = torch.randn(shape).to(device)
+        timesteps = torch.full((shape[0],), self.num_timesteps - 1, dtype=torch.long).to(device)
+
+        with torch.no_grad():
+            pred_noise = self.denoise_fn(noisy, timesteps, cond=cond)
+            x_recon = self.predict_start_from_noise(noisy, t=timesteps, noise=pred_noise)
+            logits = self.classifier(x_recon)
+            probs = F.softmax(logits, dim=1)
+        return probs
+
+    def add_ecg_to_cond(self, cond, device, ecg):
+        ecg_cond = self.ecg_encoder(ecg.to(device))
+        if not self.img_cond:
+            cond = ecg_cond
+
+        else:
+            cond = F.normalize(cond, p=2, dim=-1)
+            ecg_cond = F.normalize(ecg_cond, p=2, dim=-1)
+            cond += ecg_cond
+        cond = cond.cuda()
+        return cond
 
     @torch.inference_mode()
     def sample(self, cond=None, cond_scale=1., batch_size=16):
@@ -954,28 +1045,44 @@ class GaussianDiffusion(nn.Module):
 
         if is_list_str(cond):
             cond = bert_embed(tokenize(cond)).to(device)
-        elif self.img_cond:
+            ecg, cxr = None, None
+        elif isinstance(cond, list):
+            cxr, ecg = cond
+        else:
+            cxr = cond if self.img_cond else None
+            ecg = cond if self.ecg_cond else None
+        if self.img_cond:
             if self.medclip:
-                cond = self.xray_encoder.encode_image(cond.to(device), normalize=True)
+                cond = self.xray_encoder.encode_image(cxr.to(device), normalize=True)
                 cond = cond.to(device)
             else:
-                cond = self.xray_encoder(cond.to(device))#[0]
+                cond = self.xray_encoder(cxr.to(device))#[0]
                 # cond.to(device)
 
             if self.cfg:
+                # TODO: fix to apply on 2 conds (cxr, ecg) currently only if cxr
                 # when sampling the label is unknown class = 2
                 batch_size = cond.shape[0] if exists(cond) else batch_size
                 label = torch.full((batch_size, 1), 2).cuda()
                 cond = torch.cat((cond, label), dim=-1).cuda()
-        else:
+        # else:
+        #     cond = cond.cuda()
+        if self.ecg_cond:
+            cond = self.add_ecg_to_cond(cond, device, ecg)
+        if isinstance(cond, list):
+            cond = cond[0]+F.pad(cond[1],(0, self.img_cond_dim - self.ecg_cond_dim))
             cond = cond.cuda()
-
         batch_size = cond.shape[0] if exists(cond) else batch_size
         image_size = self.image_size
         channels = self.channels
         num_frames = self.num_frames
         _sample = self.p_sample_loop(
             (batch_size, channels, num_frames, image_size, image_size), cond=cond, cond_scale=cond_scale)
+        probs = 0
+        if self.classification_weight > 0:
+            output = self.classifier(_sample)
+            probs = F.softmax(output, dim=1)
+
 
         if isinstance(self.vqgan, VQGAN):
             # denormalize TODO: Remove eventually
@@ -1012,7 +1119,7 @@ class GaussianDiffusion(nn.Module):
 
         else:
             unnormalize_img(_sample)
-        return _sample
+        return _sample, probs
 
     @torch.inference_mode()
     def interpolate(self, x1, x2, t=None, lam=0.5):
@@ -1067,23 +1174,59 @@ class GaussianDiffusion(nn.Module):
             frames_recon_decoded.float(), frames_decoded.float()).mean() * self.perceptual_weight
         return lpips_loss
 
-    def disc_loss_fn(self, x_real,x_fake):
+    # def disc_loss_fn(self, x_real,x_fake):
+    #
+    #     self.optimizerD.zero_grad(set_to_none=True)
+    #     # logits_fake = self.netD(x_fake.contiguous().detach())[-1]
+    #     logits_fake = self.netD(x_fake.contiguous().detach())[-1]
+    #     loss_d_fake = self.adv_loss(logits_fake, target_is_real=False, for_discriminator=True)
+    #     # logits_real = self.netD(x_real.contiguous().detach())[-1]
+    #     # fake data is generated using the generator part of the GAN network.
+    #     # The goal of the discriminator is to act as a classifier to classify real and fake images.
+    #     # Now, since during the discriminator training only this classifier needs to be trained
+    #     # (and not the generator part), the fake data needs to be detached from its computation graph as
+    #     # its graph involves the parameters of the generator.
+    #     logits_real = self.netD(x_real.contiguous())[-1]
+    #     loss_d_real = self.adv_loss(logits_real, target_is_real=True, for_discriminator=True)
+    #     discriminator_loss = (loss_d_fake + loss_d_real) * 0.5
+    #
+    #     loss_d = self.discriminator_weight * discriminator_loss
+    #
+    #     loss_d.backward(retain_graph=True)
+    #     self.optimizerD.step()
+    #
+    #     return loss_d
 
+    def disc_loss_fn(self, x_real,x_fake,step, warmup_steps,warmup_phase=False):
+        gen_w = self.generator_weight * min(1.0, step / warmup_steps) if warmup_steps > 0 else 1.0
+        disc_w = self.discriminator_weight * min(1.0, step / warmup_steps)
+
+        # === Discriminator update ===
         self.optimizerD.zero_grad(set_to_none=True)
+
+        # Detach so discriminator sees them as constants
         logits_fake = self.netD(x_fake.contiguous().detach())[-1]
-        loss_d_fake = self.adv_loss(logits_fake, target_is_real=False, for_discriminator=True)
         logits_real = self.netD(x_real.contiguous().detach())[-1]
+        loss_d_fake = self.adv_loss(logits_fake, target_is_real=False, for_discriminator=True)
         loss_d_real = self.adv_loss(logits_real, target_is_real=True, for_discriminator=True)
         discriminator_loss = (loss_d_fake + loss_d_real) * 0.5
+        loss_d = disc_w * discriminator_loss
 
-        loss_d = self.discriminator_weight * discriminator_loss
+        # Discriminator update
+        if not warmup_phase:
+            loss_d.backward(retain_graph=True) # Retain so generator can still backprop
+            self.optimizerD.step()
 
-        loss_d.backward(retain_graph=True)
-        self.optimizerD.step()
+        # === Generator loss for external use ===
+        logits_fake_for_gen = self.netD(x_fake)[-1]  # No detach!
+        loss_g_real = self.adv_loss(logits_fake_for_gen, target_is_real=True, for_discriminator=False)
+        loss_g = loss_g_real * gen_w
 
-        return loss_d
+        return loss_g ,loss_d
 
-    def p_losses(self, x_start, t, cond=None, label=None, noise=None, **kwargs):
+    def p_losses(self, x_start, t, cond=None, label=None, step=None, warmup_steps=None,hard_warmup = False, noise=None, **kwargs):
+        start=time.time()
+        warmup_phase = hard_warmup & (step < warmup_steps)
         b, c, f, h, w, device = *x_start.shape, x_start.device
         noise = default(noise, lambda: torch.randn_like(x_start))
 
@@ -1092,15 +1235,22 @@ class GaussianDiffusion(nn.Module):
             cond = bert_embed(
                 tokenize(cond), return_cls_repr=self.text_use_bert_cls)
             cond = cond.to(device)
-        elif self.img_cond:
+            ecg, cxr = None, None
+        elif isinstance(cond, list):
+            cxr, ecg = cond
+        else:
+            cxr = cond if self.img_cond else None
+            ecg = cond if self.ecg_cond else None
+
+        if self.img_cond:
             if self.medclip:
-                cond = self.xray_encoder.encode_image(cond.to(device), normalize=True)
+                cond =self.xray_encoder.encode_image(cxr.to(device), normalize=True)
                 cond = cond.to(device)
             else:
-                cond = self.xray_encoder(cond.to(device))[0]
+                cond = self.xray_encoder(cxr.to(device))
                 # cond = cond.to(device)
-
         if self.cfg:
+            #TODO: fix to apply on 2 conds (cxr, ecg) currently only if cxr
             random_n = torch.rand(1)
 
             text_label = False
@@ -1121,47 +1271,71 @@ class GaussianDiffusion(nn.Module):
 
             cond = torch.cat((cond, label), dim=-1)
 
+
+        if self.ecg_cond:
+            cond = self.add_ecg_to_cond(cond, device, ecg)
+
+        if isinstance(cond, list):
+            cond = cond[0]+F.pad(cond[1],(0, self.img_cond_dim - self.ecg_cond_dim))
+            cond = cond.cuda()
         pred_noise = self.denoise_fn(x_noisy, t, cond=cond, **kwargs)
         x_recon = self.predict_start_from_noise(x_noisy, t=t, noise=pred_noise)
-
+        timer(start, time.time(), 'line 1283 before cls calc', log=log.info)
+        start = time.time()
         # Classification loss
-        cls_loss = 0
+        cls_loss, probs = 0 , 0
         if self.classification_weight > 0:
             output = self.classifier(x_recon)
+            probs = F.softmax(output, dim=1)
             cls_loss = F.binary_cross_entropy_with_logits(output, label, pos_weight=self.pos_weight)
             cls_loss = cls_loss * self.classification_weight
+        timer(start, time.time(), 'line 1292 after cls calc', log=log.info)
+        start = time.time()
         # Perceptual loss
         lpips_loss = 0
         if self.perceptual_weight > 0:
             lpips_loss = self.lpips_loss_fn(x_start,x_recon)
+        timer(start, time.time(), 'line 1298 after lpips calc', log=log.info)
+        start = time.time()
 
         # Discriminator loss
-        disc_loss = 0
+        gen_loss, disc_loss = 0,0
         if self.discriminator_weight > 0:
-            disc_loss = self.disc_loss_fn(x_start,x_recon)
+            gen_loss, disc_loss = self.disc_loss_fn(x_start,x_recon, step, warmup_steps,warmup_phase)
+        timer(start, time.time(), 'line 1305 after disc calc', log=log.info)
+
+        l1_loss = F.l1_loss(noise, pred_noise)
+        l1_loss_w = l1_loss
+        if self.l1_weight > 0:
+            l1_loss_w = l1_loss* self.l1_weight
 
         if self.loss_type == 'l1':
-            loss = F.l1_loss(noise, pred_noise)
+            loss = l1_loss
         elif self.loss_type == 'l2':
             loss = F.mse_loss(noise, pred_noise)
         elif self.loss_type =='l1_cls':
-            loss = F.l1_loss(noise, pred_noise)*self.l1_weight + cls_loss
+            loss = l1_loss_w + cls_loss
         elif self.loss_type == 'l1_lpips':
-            loss = F.l1_loss(noise, pred_noise)*self.l1_weight + lpips_loss
+            loss = l1_loss_w + lpips_loss
         elif self.loss_type == 'l1_disc':
-            loss = F.l1_loss(noise, pred_noise)*self.l1_weight + disc_loss
+            loss = l1_loss_w + gen_loss if not warmup_phase else l1_loss_w
         elif self.loss_type == 'l1_lpips_disc':
-            loss = F.l1_loss(noise, pred_noise)*self.l1_weight + lpips_loss + disc_loss
+            loss = l1_loss_w + lpips_loss + gen_loss  if not warmup_phase else l1_loss_w + lpips_loss
+        elif self.loss_type == 'l1_cls_lpips':
+            loss = l1_loss_w + lpips_loss + cls_loss
         elif self.loss_type == 'l1_cls_lpips_disc':
-            loss = F.l1_loss(noise, pred_noise)*self.l1_weight + lpips_loss + disc_loss + cls_loss
+            loss = l1_loss_w + lpips_loss + gen_loss + cls_loss  if not warmup_phase else l1_loss_w + lpips_loss + cls_loss
         else:
             raise NotImplementedError()
 
-        return {'total': loss, 'lpips_loss': lpips_loss, 'disc_loss': disc_loss, 'cls_loss': cls_loss}
+        return {'total_loss': loss, 'l1_loss': l1_loss_w, 'lpips_loss': lpips_loss, 'disc_loss': disc_loss,
+                'gen_loss': gen_loss, 'cls_loss': cls_loss} , probs
 
     def forward(self, x, *args, **kwargs):
+        start= time.time()
         ct = x['ct'].cuda()
-        xray = x['cxr'].cuda()
+        cxr = x['cxr'].cuda() if 'cxr' in x else None
+        ecg = x['ecg'].cuda() if 'ecg' in x else None
         label = x['target'].cuda()
         if isinstance(self.vqgan, VQGAN):
             with torch.no_grad():
@@ -1182,12 +1356,24 @@ class GaussianDiffusion(nn.Module):
         else:
             print("Hi")
             ct = normalize_img(ct)
-
         b, device, img_size, = ct.shape[0], ct.device, self.image_size
         check_shape(ct, 'b c f h w', c=self.channels,
                     f=self.num_frames, h=img_size, w=img_size)
         t = torch.randint(0, self.num_timesteps, (b,), device=device).long()
-        return self.p_losses(ct, t, cond=xray, label=label, *args, **kwargs)
+        cond = [cxr,ecg] if ((cxr is not None) and (ecg is not None)) else cxr if cxr is not None else ecg
+        # timer(start,time.time(),'line 1357 after load ct',log=log.info)
+        start = time.time()
+        losses, probs =  self.p_losses(ct, t, cond=cond, label=label, *args, **kwargs)
+        # timer(start, time.time(), 'line 1360 after calc losses', log=log.info)
+        start = time.time()
+        results = losses
+        if self.classification_weight > 0:
+            # label_one_hot = F.one_hot(label.view(-1), num_classes=2)
+            accuracy = binary_accuracy(probs, label)
+            results.update({'cls_train_accuracy': accuracy})
+        # timer(start, time.time(), msg="From starting forward till the ct load")
+        # timer(start, time.time(), 'line 1368 after calc accuracy in forward', log=log.info)
+        return results
 
 # trainer class
 CHANNELS_TO_MODE = {
@@ -1314,6 +1500,8 @@ class Trainer(object):
         num_workers=20,
         lora = True,
         lora_first = False,
+        hard_warmup=False,
+        warmup_steps=5000
     ):
         super().__init__()
         self.model = diffusion_model
@@ -1330,6 +1518,8 @@ class Trainer(object):
         self.train_num_steps = train_num_steps
         self.lora = lora
         self.lora_first = lora_first
+        self.warmup_steps=warmup_steps
+        self.hard_warmup= hard_warmup
 
         image_size = diffusion_model.image_size
         channels = diffusion_model.channels
@@ -1431,25 +1621,42 @@ class Trainer(object):
             log_fn=log.info
     ):
         assert callable(log_fn)
+        train_acc=[]
+        val_acc=[]
+        start = time.time()
         while self.step < self.train_num_steps:
             for i in range(self.gradient_accumulate_every):
                 data = next(self.dl)
+                # timer(start,time.time(), 'line 1624 after load data', log=log_fn)
+                start = time.time()
                 # Amp = flag to use mixed precision (efficiency purposes)
                 with autocast('cuda', enabled=self.amp):
                     total_loss = self.model(
                         data,
+                        step=self.step,
+                        warmup_steps= self.warmup_steps,
+                        hard_warmup=self.hard_warmup,
                         prob_focus_present=prob_focus_present,
                         focus_present_mask=focus_present_mask
                     )
-
-                    loss = total_loss['total']
+                    # timer(start,time.time(), 'line 1638 after forward', log=log_fn)
+                    start = time.time()
+                    loss = total_loss['total_loss']
 
                     self.scaler.scale(
                         loss / self.gradient_accumulate_every).backward()
+            log = {l: total_loss[l].item() if torch.is_tensor(total_loss[l]) else total_loss[l] for l in total_loss}
+            train_acc.append(log["cls_train_accuracy"])
+            # if self.step % 100 == 0:
+            division = min(len(train_acc),50)
+            cls_train_total_accuracy = sum(train_acc[-division:]) / division
+            # timer(start,time.time(), 'line 1647 after accuracy calc', log=log_fn)
+            start = time.time()
 
-                print(f'{self.step}: {loss.item()}')
-                # wandb.log({"loss": loss.item(), "step": self.step})
-            log = {l: total_loss[l].item() for l in total_loss}
+            log.update({"cls_train_total_accuracy":cls_train_total_accuracy})
+
+            log.update({"step": self.step})
+
 
             # Max grad norm to limit gradient explosion
             if exists(self.max_grad_norm):
@@ -1476,10 +1683,19 @@ class Trainer(object):
                     batches = num_to_groups(num_samples, self.batch_size)
 
                     sampled_data = next(self.val_dl)
-                    xrays = sampled_data['cxr']
-                    all_videos_list = list(
-                        map(lambda n: self.ema_model.sample(cond=xrays, batch_size=n), batches))
+                    cxr = sampled_data['cxr'].cuda() if 'cxr' in sampled_data else None
+                    ecg = sampled_data['ecg'].cuda() if 'ecg' in sampled_data else None
+                    cond = [cxr, ecg] if ((cxr is not None) and (ecg is not None)) else cxr if cxr is not None else ecg
+                    videos_probs = list(
+                        map(lambda n: self.ema_model.sample(cond=cond, batch_size=n), batches))
+                    all_videos_list, probs = zip(*videos_probs)
+                    all_videos_list, probs = [all_videos_list[0]], probs[0]
                     all_videos_list = torch.cat(all_videos_list, dim=0)
+                    if self.model.classification_weight > 0:
+                        label = sampled_data['target']
+                        # label_one_hot = F.one_hot(label.view(-1), num_classes=2)
+                        accuracy = binary_accuracy(probs, label.cuda())
+                        log = {**log, 'cls_val_accuracy': accuracy}
 
                 all_videos_list = F.pad(all_videos_list, (2, 2, 2, 2))
 
@@ -1487,7 +1703,7 @@ class Trainer(object):
                     all_videos_list, '(i j) c f h w -> c f (i h) (j w)', i=self.num_sample_rows)
                 video_path = str(self.results_folder / str(f'{milestone}.gif'))
                 video_tensor_to_gif(one_gif, video_path)
-                log = {**log, 'sample': video_path}
+                # log = {**log, 'sample': video_path}
 
                 # Selects one random 2D image from each 3D Image
                 B, C, D, H, W = all_videos_list.shape
@@ -1509,112 +1725,128 @@ class Trainer(object):
                     plt.savefig(path)
 
                 self.save(milestone)
+            if "cls_val_accuracy" in log:
+                val_acc.append(log["cls_val_accuracy"])
+                division = min(len(val_acc), 50)
+                cls_val_total_accuracy = sum(val_acc[-division:]) / division
+                log.update({"cls_val_total_accuracy": cls_val_total_accuracy})
+            # timer(start, time.time(), 'line 1726 after sample', log=log_fn)
 
             log_fn(log)
+            wandb.log(log)
+
             self.step += 1
+            start = time.time()
 
         print('training completed')
 
-#
-# class Sampler(object):
-#     def __init__(
-#             self,
-#             diffusion_model_milestone,
-#             map_location='cpu',
-#             batch_size=1,
-#             folder=None,
-#             dataset=None,
-#             results_folder='./results',
-#             num_sample_rows=1,
-#             num_workers=20,
-#     ):
-#         super().__init__()
-#
-#         self.load(diffusion_model_milestone, map_location=map_location)
-#
-#         # Use only ema model during Inference
-#         self.ema_model.eval()
-#
-#         if dataset:
-#             self.ds = dataset
-#
-#         dl = DataLoader(self.ds, batch_size=batch_size, pin_memory=True, num_workers=num_workers, prefetch_factor=1)
-#
-#         self.len_dataloader = len(dl)
-#         self.dl = cycle(dl)
-#         print(f'found {len(self.ds)} videos as gif files at {folder}')
-#         assert len(
-#             self.ds) > 0, 'need to have at least 1 video to start training (although 1 is not great, try 100k)'
-#         self.num_sample_rows = num_sample_rows
-#         self.results_folder = Path(results_folder)
-#         self.results_folder.mkdir(exist_ok=True, parents=True)
-#
-#     def load(self, milestone, map_location=None, **kwargs):
-#         get_milestone_path = lambda milestone: str(self.results_folder / f'model-{milestone}.pt')
-#         if milestone == -1:
-#             all_milestones = [int(p.stem.split('-')[-1])
-#                               for p in Path(self.results_folder).glob('**/*.pt')]
-#             assert len(
-#                 all_milestones) > 0, 'need to have at least one milestone to load from latest checkpoint (milestone == -1)'
-#             milestone = max(all_milestones)
-#
-#         if map_location:
-#             data = torch.load(get_milestone_path(milestone), map_location=map_location)
-#         else:
-#             data = torch.load(milestone)
-#
-#         # self.model.load_state_dict(data['model'], strict=False, **kwargs)
-#         self.ema_model.load_state_dict(data['ema'], strict=False, **kwargs)
-#
-#
-#     def generate(self,
-#               result_file_name,
-#               slices_to_extract: list[int],
-#               log_fn=log.info):
-#         assert callable(log_fn)
-#
-#         with torch.no_grad():
-#             num_samples = self.num_sample_rows ** 2
-#             batches = num_to_groups(num_samples, self.batch_size)
-#
-#             sampled_data = next(self.dl)
-#             xrays = sampled_data['cxr']
-#             all_videos_list = list(
-#                 map(lambda n: self.ema_model.sample(cond=xrays, batch_size=n), batches))
-#             all_videos_list = torch.cat(all_videos_list, dim=0)
-#
-#         all_videos_list = F.pad(all_videos_list, (2, 2, 2, 2))
-#
-#         one_gif = rearrange(
-#             all_videos_list, '(i j) c f h w -> c f (i h) (j w)', i=self.num_sample_rows)
-#         video_path = str(self.results_folder / str(f'{result_file_name}.gif'))
-#         video_tensor_to_gif(one_gif, video_path)
-#
-#         def extract_jpg(frame_idx):
-#             frame_idx_selected = frame_idx.reshape(
-#                 -1, 1, 1, 1, 1).repeat(1, C, 1, H, W)
-#             frames = torch.gather(
-#                 all_videos_list, 2, frame_idx_selected).squeeze(2)
-#
-#             path = str(self.results_folder /
-#                        f'sample-{result_file_name}-{'-'.join(map(str, frame_idx_batch))}.jpg')
-#             plt.figure(figsize=(50, 50))
-#             cols = 5
-#             for num, frame in enumerate(frames.cpu()):
-#                 plt.subplot(
-#                     math.ceil(len(frames) / cols), cols, num + 1)
-#                 plt.axis('off')
-#                 plt.imshow(frame[0], cmap='gray')
-#                 plt.savefig(path)
-#
-#         B, C, D, H, W = all_videos_list.shape
-#         if len(slices_to_extract) == 0:
-#             # Selects one random 2D image from each 3D Image
-#             frame_idx = torch.randint(0, D, [B]).cuda()
-#             extract_jpg(frame_idx)
-#
-#         for frame_idx_batch in batched(slices_to_extract, B):
-#             frame_idx = torch.tensor(frame_idx_batch).cuda()
-#             extract_jpg(frame_idx)
-#
-#     # def predict(self, volume):
+
+class Inferencer(object):
+    def __init__(
+            self,
+            diffusion_model_milestone,
+            map_location='cpu',
+            batch_size=1,
+            folder=None,
+            dataset=None,
+            results_folder='./results',
+            num_sample_rows=1,
+            num_workers=20,
+    ):
+        super().__init__()
+
+        self.load(diffusion_model_milestone, map_location=map_location)
+
+        # Use only ema model during Inference
+        self.ema_model.eval()
+
+        if dataset:
+            self.ds = dataset
+
+        dl = DataLoader(self.ds, batch_size=batch_size, pin_memory=True, num_workers=num_workers, prefetch_factor=1)
+
+        self.len_dataloader = len(dl)
+        self.dl = cycle(dl)
+        print(f'found {len(self.ds)} videos as gif files at {folder}')
+        assert len(
+            self.ds) > 0, 'need to have at least 1 video to start training (although 1 is not great, try 100k)'
+        self.num_sample_rows = num_sample_rows
+        self.results_folder = Path(results_folder)
+        self.results_folder.mkdir(exist_ok=True, parents=True)
+
+    def load(self, milestone, map_location=None, **kwargs):
+        get_milestone_path = lambda milestone: str(self.results_folder / f'model-{milestone}.pt')
+        if milestone == -1:
+            all_milestones = [int(p.stem.split('-')[-1])
+                              for p in Path(self.results_folder).glob('**/*.pt')]
+            assert len(
+                all_milestones) > 0, 'need to have at least one milestone to load from latest checkpoint (milestone == -1)'
+            milestone = max(all_milestones)
+
+        if map_location:
+            data = torch.load(get_milestone_path(milestone), map_location=map_location)
+        else:
+            data = torch.load(milestone)
+
+        # self.model.load_state_dict(data['model'], strict=False, **kwargs)
+        self.ema_model.load_state_dict(data['ema'], strict=False, **kwargs)
+
+
+    def generate(self,
+              result_file_name,
+              slices_to_extract: list[int],
+              log_fn=log.info):
+        assert callable(log_fn)
+
+        with torch.no_grad():
+            num_samples = self.num_sample_rows ** 2
+            batches = num_to_groups(num_samples, self.batch_size)
+
+            sampled_data = next(self.dl)
+            xrays = sampled_data['cxr']
+            all_videos_list = list(
+                map(lambda n: self.ema_model.sample(cond=xrays, batch_size=n), batches))
+            all_videos_list = torch.cat(all_videos_list, dim=0)
+
+        all_videos_list = F.pad(all_videos_list, (2, 2, 2, 2))
+
+        one_gif = rearrange(
+            all_videos_list, '(i j) c f h w -> c f (i h) (j w)', i=self.num_sample_rows)
+        video_path = str(self.results_folder / str(f'{result_file_name}.gif'))
+        video_tensor_to_gif(one_gif, video_path)
+
+        def extract_jpg(frame_idx):
+            frame_idx_selected = frame_idx.reshape(
+                -1, 1, 1, 1, 1).repeat(1, C, 1, H, W)
+            frames = torch.gather(
+                all_videos_list, 2, frame_idx_selected).squeeze(2)
+
+            path = str(self.results_folder /
+                       f'sample-{result_file_name}-{'-'.join(map(str, frame_idx_batch))}.jpg')
+            plt.figure(figsize=(50, 50))
+            cols = 5
+            for num, frame in enumerate(frames.cpu()):
+                plt.subplot(
+                    math.ceil(len(frames) / cols), cols, num + 1)
+                plt.axis('off')
+                plt.imshow(frame[0], cmap='gray')
+                plt.savefig(path)
+
+        B, C, D, H, W = all_videos_list.shape
+        if len(slices_to_extract) == 0:
+            # Selects one random 2D image from each 3D Image
+            frame_idx = torch.randint(0, D, [B]).cuda()
+            extract_jpg(frame_idx)
+
+        for frame_idx_batch in batched(slices_to_extract, B):
+            frame_idx = torch.tensor(frame_idx_batch).cuda()
+            extract_jpg(frame_idx)
+
+    def predict(self):
+        x = next(self.dl)
+        cxr = x['cxr'].cuda() if 'cxr' in x else None
+        ecg = x['ecg'].cuda() if 'ecg' in x else None
+        cond = [cxr,ecg] if ((cxr is not None) and (ecg is not None)) else cxr if cxr is not None else ecg
+        self.ema_model. predict(cond)
+
+

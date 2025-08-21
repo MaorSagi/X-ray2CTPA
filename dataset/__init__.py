@@ -4,3 +4,4 @@ from dataset.default import DEFAULTDataset
 from dataset.xray_ctpa import XrayCTPADataset
 from dataset.ctpa import CTPADataset
 from dataset.rspect import RSPECTDataset
+from dataset.ecg_xray_ctpa import ECGXrayCTPADataset

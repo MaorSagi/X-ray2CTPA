@@ -1,4 +1,4 @@
-from dataset import LIDCDataset, XrayLIDCDataset, DEFAULTDataset, XrayCTPADataset, CTPADataset, RSPECTDataset
+from dataset import LIDCDataset, XrayLIDCDataset, DEFAULTDataset, ECGXrayCTPADataset,XrayCTPADataset, CTPADataset, RSPECTDataset
 from torch.utils.data import WeightedRandomSampler
 from params import TRAIN_LABELS, VALID_LABELS, RSPECT_TRAIN_LABELS, RSPECT_VALID_LABELS, LIDC_TRAIN_LABELS, LIDC_TEST_LABELS
 
@@ -21,9 +21,14 @@ def get_dataset(cfg):
         val_dataset = XrayCTPADataset(root=cfg.dataset.root_dir, target=VALID_LABELS, mode="test", augmentation=True)
         sampler = None
         return train_dataset, val_dataset, sampler
+    if cfg.dataset.name == 'ECG_XRAY_CTPA':
+        train_dataset = ECGXrayCTPADataset(root=cfg.dataset.root_dir, target=TRAIN_LABELS, mode="train", augmentation=True)
+        val_dataset = ECGXrayCTPADataset(root=cfg.dataset.root_dir, target=VALID_LABELS, mode="test", augmentation=True)
+        sampler = None
+        return train_dataset, val_dataset, sampler
     if cfg.dataset.name == 'CTPA':
-        train_dataset = CTPADataset(root=cfg.dataset.root_dir, target=TRAIN_LABELS, mode="train", augmentation=True,cond_dim=cfg.model.cond_dim)
-        val_dataset = CTPADataset(root=cfg.dataset.root_dir, target=VALID_LABELS, mode="test", augmentation=True,cond_dim=cfg.model.cond_dim)
+        train_dataset = CTPADataset(root=cfg.dataset.root_dir, target=TRAIN_LABELS, mode="train", augmentation=True,img_cond_dim=cfg.model.img_cond_dim, ecg_cond_dim=cfg.model.ecg_cond_dim)
+        val_dataset = CTPADataset(root=cfg.dataset.root_dir, target=VALID_LABELS, mode="test", augmentation=True,img_cond_dim=cfg.model.img_cond_dim, ecg_cond_dim=cfg.model.ecg_cond_dim)
         sampler = None
         return train_dataset, val_dataset, sampler
     if cfg.dataset.name == 'RSPECT':

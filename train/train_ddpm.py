@@ -1,4 +1,8 @@
+import time
+start = time.time()
+
 from re import I
+import os
 from ddpm import Unet3D, GaussianDiffusion, Trainer
 # from dataset import MRNetDataset, BRATSDataset
 import argparse
@@ -6,21 +10,39 @@ import hydra
 from omegaconf import DictConfig, OmegaConf, open_dict
 from train.get_dataset import get_dataset
 import torch
-import os
 from ddpm.unet import UNet
 from datetime import date
 import logging
-
+import wandb
 log = logging.getLogger(__name__)
+torch.autograd.set_detect_anomaly(True)
+
+def timer(start,end, msg=''):
+            hours, rem = divmod(end-start, 3600)
+            minutes, seconds = divmod(rem, 60)
+            print(f"{msg}-"+"{:0>2}:{:0>2}:{:05.2f}".format(int(hours),int(minutes),seconds))
+
+def flatten_dict(d, parent_key='', sep='.'):
+    items = []
+    for k, v in d.items():
+        new_key = f"{parent_key}{sep}{k}" if parent_key else k
+        if isinstance(v, (dict, DictConfig)):
+            items.extend(flatten_dict(v, new_key, sep=sep).items())
+        else:
+            items.append((new_key, v))
+    return dict(items)
 
 
 @hydra.main(config_path='../config', config_name='base_cfg', version_base=None)
 def run(cfg: DictConfig):
+    global start
     torch.cuda.set_device(cfg.model.gpus)
 
     with open_dict(cfg):
         cfg.model.results_folder = os.path.join(
             cfg.model.results_folder, cfg.dataset.name, cfg.model.results_folder_postfix)
+
+    wandb.init(project="ECGXray2CTPA", config=flatten_dict(cfg))
 
 
     if cfg.model.denoising_fn == 'Unet3D':
@@ -51,6 +73,9 @@ def run(cfg: DictConfig):
         channels=cfg.model.diffusion_num_channels,
         timesteps=cfg.model.timesteps,
         img_cond = 'xray' in cfg.model.name_dataset.lower(),
+        img_cond_dim = cfg.model.img_cond_dim,
+        ecg_cond='ecg' in cfg.model.name_dataset.lower(),
+        ecg_cond_dim=cfg.model.ecg_cond_dim,
         loss_type=cfg.model.loss_type,
         l1_weight = cfg.model.l1_weight,
         perceptual_weight = cfg.model.perceptual_weight,
@@ -83,12 +108,16 @@ def run(cfg: DictConfig):
         max_grad_norm=cfg.model.max_grad_norm,
         lora = cfg.model.lora,
         lora_first = cfg.model.lora_first,
+        warmup_steps=cfg.model.warmup_steps,
+        hard_warmup=cfg.model.hard_warmup,
     )
 
     if cfg.model.load_milestone:
         trainer.load(cfg.model.load_milestone, map_location='cuda:'+str(cfg.model.gpus))
-
+    timer(start, time.time(),msg="From starting program till training model")
+    start = time.time()
     trainer.train()
+    timer(start, time.time(),msg="From starting program till the end")
 
 
 if __name__ == '__main__':

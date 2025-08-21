@@ -1,0 +1,4 @@
+name: ECG_XRAY_CTPA
+root_dir: ""
+image_channels: 1
+augmentation: True

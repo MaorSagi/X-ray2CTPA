@@ -9,9 +9,12 @@ dim_mults: [1,2,4,8]
 
 
 results_folder: "./checkpoints/ddpm/"
-results_folder_postfix: 'lora_finetune-new'
-load_milestone: ''#'-1 #'-1, ''
-cond_dim: 512 # 512, 256
+results_folder_postfix: 'lora_finetune'
+load_milestone: -1 #'-1, ''
+img_cond_dim: 512
+ecg_cond_dim: 64
+cond_dim: 512 # 512, 256 total cond dim size
+
 
 batch_size: 2
 num_workers: 10
@@ -22,29 +25,32 @@ denoising_fn: Unet3D
 train_lr: 1e-4 # 1e-4 unconditional 1e-5 conditional
 timesteps: 1000 # number of steps
 sampling_timesteps: 500 # number of sampling timesteps (using ddim for faster inference [see citation for ddim paper])
-loss_type: l1_lpips
+loss_type: l1_cls_lpips
 train_num_steps: 2000000 # total training steps
-gradient_accumulate_every: 2 # gradient accumulation steps
+gradient_accumulate_every: 5 # gradient accumulation steps
 ema_decay: 0.995 # exponential moving average decay
 amp: False # turn on mixed precision
 num_sample_rows: 1
 max_grad_norm: 1.0
 gpus: 0
+warmup_steps: 5000 # 0
+hard_warmup: False
 l1_weight : 1.0
-perceptual_weight : 0.01
-discriminator_weight : 0.001
+perceptual_weight :  0.01
+discriminator_weight : 0.00004 # 0.004
+generator_weight: 0.0012 # 0.12
 classification_weight: 0.08
 classifier_free_guidance: False
 lora: True
-lora_first: False
+lora_first: True # only set True for my pretrained model, otherwise set to False
 medclip: False
-#name_dataset: CTPA # The dataset name for normalization: options are RSPECT, LIDC, CTPA
-#dataset_min_value: -12.911299 # min value of the dataset for normalization
-#dataset_max_value: 9.596558  # max value of the dataset for normalization
+name_dataset: CTPA # The dataset name for normalization: options are RSPECT, LIDC, CTPA
+dataset_min_value: -12.911299 # min value of the dataset for normalization
+dataset_max_value: 9.596558  # max value of the dataset for normalization
 
-name_dataset: RSPECT
-dataset_min_value: -8.749182 # min value of the dataset for normalization
-dataset_max_value: 8.710065  # max value of the dataset for normalization
+#name_dataset: ECG_XRAY_CTPA
+#dataset_min_value: -8.749182 # min value of the dataset for normalization
+#dataset_max_value: 8.710065  # max value of the dataset for normalization
 
 
 
