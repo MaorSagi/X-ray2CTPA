@@ -249,10 +249,10 @@ class ECGXrayCTPADataset(data.Dataset):
         cxr_accession = self.data.loc[idx, XRAY_ACCESSION_COL]
         ecg_accession = self.data.loc[idx, ECG_ACCESSION_COL]
         label = self.data.loc[idx, LABEL_COL]
-        label = F.one_hot(label.view(-1).to(torch.int64), num_classes=2).to(torch.float32)
+        label = F.one_hot(torch.tensor(label).to(torch.int64), num_classes=2).to(torch.float32)
         if not self.text_label:
             label = torch.tensor(label).type(torch.DoubleTensor)
-            label = label.reshape(1)
+            # label = label.reshape(1)
         else:
             if label:
                 label = "Positive"

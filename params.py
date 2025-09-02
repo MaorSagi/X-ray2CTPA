@@ -26,13 +26,13 @@ ECG_ACCESSION_COL = 'ecg_RowID'
 LIDC_CT_ACCESSION_COL = 'Subject ID'
 DEVICE = "cuda"
 
-TRAIN_LABELS = r"D:\Maor\X-ray2CTPA\data\train.csv"
-TEST_LABELS =  r"D:\Maor\X-ray2CTPA\data\test.csv"
-VALID_LABELS =  r"D:\Maor\X-ray2CTPA\data\validation.csv"
+# TRAIN_LABELS = r"D:\Maor\X-ray2CTPA\data\train.csv"
+# TEST_LABELS =  r"D:\Maor\X-ray2CTPA\data\test.csv"
+# VALID_LABELS =  r"D:\Maor\X-ray2CTPA\data\validation.csv"
 
-# TRAIN_LABELS = r"D:\Maor\X-ray2CTPA\data\train_xray_ecg_full_props_PE_data_split_filtered.csv"
-# TEST_LABELS =  r"D:\Maor\X-ray2CTPA\data\test_xray_ecg_full_props_PE_data_split_filtered.csv"
-# VALID_LABELS =  r"D:\Maor\X-ray2CTPA\data\validation_xray_ecg_full_props_PE_data_split_filtered.csv"
+TRAIN_LABELS = r"D:\Maor\X-ray2CTPA\data\train_xray_ecg_full_props_PE_data_split_filtered.csv"
+TEST_LABELS =  r"D:\Maor\X-ray2CTPA\data\test_xray_ecg_full_props_PE_data_split_filtered.csv"
+VALID_LABELS =  r"D:\Maor\X-ray2CTPA\data\validation_xray_ecg_full_props_PE_data_split_filtered.csv"
 
 GEN_TRAIN_LABELS = "labels_csv/cross_validation_ct_generation/fold0/y_train.csv"
 GEN_TEST_LABELS =  "labels_csv/cross_validation_ct_generation/fold0/y_test.csv"
