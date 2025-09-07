@@ -4,4 +4,4 @@ set PYTHONPATH=%PYTHONPATH%;D:\Maor\X-ray2CTPA
 python D:/Maor/X-ray2CTPA/train/train_ddpm.py model=ddpm dataset=ecgxrayctpa
 
 
-python D:/Maor/X-ray2CTPA/train/train_ddpm.py model=ddpm dataset=ctpa
+python D:/Maor/X-ray2CTPA/train/train_ddpm.py model=ddpm-debug dataset=ctpa

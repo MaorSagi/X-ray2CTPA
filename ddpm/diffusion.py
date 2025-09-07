@@ -58,8 +58,8 @@ def timer(start, end, msg='', log=print):
 
 def binary_accuracy(y_pred, y_true):
     y_pred_labels = (y_pred > ACCURACY_THRESHOLD).int()
-    correct = (y_pred_labels == y_true.int()).sum().item()
-    accuracy = correct / y_true.numel()
+    correct = (y_pred_labels[:,1] == y_true[:,1].int()).sum().item() # calc only the positive class accuracy
+    accuracy = correct / y_true[:,1].numel()
     return accuracy
 
     # _, y_pred_tags = torch.max(y_pred, dim=1)
@@ -771,9 +771,8 @@ class GaussianDiffusion(nn.Module):
             self.vqgan.eval()
 
         if vae_ckpt is not None:
-            local_path = "weights/vae-ft-mse-840000-ema-pruned.safetensors"
             config_path = "weights/config.json"
-            self.vae = AutoencoderKL.from_single_file(local_path, local_files_only=True, config=config_path)
+            self.vae = AutoencoderKL.from_single_file(vae_ckpt, local_files_only=True, config=config_path)
             self.vae.eval()
         if img_cond:
             if self.medclip:
@@ -978,7 +977,6 @@ class GaussianDiffusion(nn.Module):
 
     @torch.inference_mode()
     def predict(self, cond, cond_scale=1.0):
-        breakpoint()
         device = next(self.denoise_fn.parameters()).device
 
         if is_list_str(cond):
@@ -1286,6 +1284,7 @@ class GaussianDiffusion(nn.Module):
         cls_loss, probs = 0 , 0
         if self.classification_weight > 0:
             output = self.classifier(x_recon)
+            breakpoint()
             probs = F.softmax(output, dim=1)
             cls_loss = F.binary_cross_entropy_with_logits(output, label, pos_weight=self.pos_weight)
             cls_loss = cls_loss * self.classification_weight
@@ -1369,6 +1368,7 @@ class GaussianDiffusion(nn.Module):
         results = losses
         if self.classification_weight > 0:
             # label_one_hot = F.one_hot(label.view(-1), num_classes=2)
+            log.info(f"TRAIN LABEL: 0 -> {label[0][0].item()}, 1-> {label[0][1].item()} PREDICTION: 0 -> {probs[0][0].item()}, 1-> {probs[0][1].item()}")
             accuracy = binary_accuracy(probs, label)
             results.update({'cls_train_accuracy': accuracy})
         # timer(start, time.time(), msg="From starting forward till the ct load")
@@ -1570,6 +1570,7 @@ class Trainer(object):
         self.ema.update_model_average(self.ema_model, self.model)
 
     def save(self, milestone):
+        breakpoint()
         data = {
             'step': self.step,
             'model': self.model.state_dict(),
@@ -1605,7 +1606,7 @@ class Trainer(object):
             else:
                 self.model.eval()
                 self.ema_model.eval()
-                inject_trainable_lora(self.model.denoise_fn)
+                inject_trainable_lora(self.model.denoise_fn)  # This will turn off all the gradients of the model, except for the trainable LoRA params.
                 inject_trainable_lora(self.ema_model.denoise_fn)
                 self.model.load_state_dict(data['model'], strict=False, **kwargs)
                 self.ema_model.load_state_dict(data['ema'], strict=False, **kwargs)
@@ -1643,7 +1644,7 @@ class Trainer(object):
                     start = time.time()
                     loss = total_loss['total_loss']
 
-                    self.scaler.scale(
+                self.scaler.scale(
                         loss / self.gradient_accumulate_every).backward()
             log = {l: total_loss[l].item() if torch.is_tensor(total_loss[l]) else total_loss[l] for l in total_loss}
             train_acc.append(log["cls_train_accuracy"])
@@ -1694,6 +1695,8 @@ class Trainer(object):
                     if self.model.classification_weight > 0:
                         label = sampled_data['target']
                         # label_one_hot = F.one_hot(label.view(-1), num_classes=2)
+                        log_fn(
+                            f"VALIDATION LABEL: 0 -> {label[0][0].item()}, 1-> {label[0][1].item()} PREDICTION: 0 -> {probs[0][0].item()}, 1-> {probs[0][1].item()}")
                         accuracy = binary_accuracy(probs, label.cuda())
                         log = {**log, 'cls_val_accuracy': accuracy}
 
