@@ -96,7 +96,7 @@ def run(cfg: DictConfig):
         cfg=cfg,
         dataset=train_dataset,
         val_dataset=val_dataset,
-        train_batch_size=cfg.model.batch_size,
+        batch_size=cfg.model.batch_size,
         save_and_sample_every=cfg.model.save_and_sample_every,
         train_lr=cfg.model.train_lr,
         train_num_steps=cfg.model.train_num_steps,

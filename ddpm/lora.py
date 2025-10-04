@@ -263,10 +263,8 @@ def inject_trainable_lora(
     """
     inject lora into model, and returns lora parameter groups.
     """
-
     require_grad_params = []
     names = []
-
     if loras != None:
         loras = torch.load(loras)
 
@@ -298,8 +296,8 @@ def inject_trainable_lora(
         require_grad_params.append(_module._modules[name].lora_down.parameters())
 
         if loras != None:
-            _module._modules[name].lora_up.weight = loras.pop(0)
-            _module._modules[name].lora_down.weight = loras.pop(0)
+            _module._modules[name].lora_up.weight = nn.Parameter(loras.pop(0).to(_child_module.weight.device))
+            _module._modules[name].lora_down.weight = nn.Parameter(loras.pop(0).to(_child_module.weight.device))
 
         _module._modules[name].lora_up.weight.requires_grad = True
         _module._modules[name].lora_down.weight.requires_grad = True
@@ -424,13 +422,14 @@ def save_lora_weight(
     model,
     path="./lora.pt",
     target_replace_module=DEFAULT_TARGET_REPLACE,
+    mixed_precision = False
 ):
     weights = []
     for _up, _down in extract_lora_ups_down(
         model, target_replace_module=target_replace_module
     ):
-        weights.append(_up.weight.to("cpu").to(torch.float16))
-        weights.append(_down.weight.to("cpu").to(torch.float16))
+        weights.append(_up.weight.to("cpu").to(torch.float16) if mixed_precision else _up.weight.to("cpu"))
+        weights.append(_down.weight.to("cpu").to(torch.float16) if mixed_precision else _down.weight.to("cpu"))
 
     torch.save(weights, path)
 

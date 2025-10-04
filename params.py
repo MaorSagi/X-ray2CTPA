@@ -16,7 +16,7 @@ CONTRAST_HU_MEAN = 0.15897  # Mean voxel value after normalization and clipping
 CONTRAST_HU_STD = 0.19974   # Standard deviation of voxel values after normalization and clipping
 
 # Dataset parameters
-POS_WEIGHT = 0.32 # in the current cohort (CTPA -> 32%) #0.15
+POS_WEIGHT = 0.13 # in the current cohort (CTPA -> 32%) #0.13
 ACCURACY_THRESHOLD = POS_WEIGHT
 LABEL_COL = 'PE'
 CT_ACCESSION_COL = 'CT_sps_key'
@@ -26,13 +26,13 @@ ECG_ACCESSION_COL = 'ecg_RowID'
 LIDC_CT_ACCESSION_COL = 'Subject ID'
 DEVICE = "cuda"
 
-TRAIN_LABELS = r"D:\Maor\X-ray2CTPA\data\train.csv"
-TEST_LABELS =  r"D:\Maor\X-ray2CTPA\data\test.csv"
-VALID_LABELS =  r"D:\Maor\X-ray2CTPA\data\validation.csv"
+# TRAIN_LABELS = r"D:\Maor\X-ray2CTPA\data\train.csv"
+# TEST_LABELS =  r"D:\Maor\X-ray2CTPA\data\test.csv"
+# VALID_LABELS =  r"D:\Maor\X-ray2CTPA\data\validation.csv"
 
-# TRAIN_LABELS = r"D:\Maor\X-ray2CTPA\data\train_xray_ecg_full_props_PE_data_split_filtered.csv"
-# TEST_LABELS =  r"D:\Maor\X-ray2CTPA\data\test_xray_ecg_full_props_PE_data_split_filtered.csv"
-# VALID_LABELS =  r"D:\Maor\X-ray2CTPA\data\validation_xray_ecg_full_props_PE_data_split_filtered.csv"
+TRAIN_LABELS = r"D:\Maor\X-ray2CTPA\data\train_xray_ecg_full_props_PE_data_split_filtered.csv"
+TEST_LABELS =  r"D:\Maor\X-ray2CTPA\data\test_xray_ecg_full_props_PE_data_split_filtered.csv"
+VALID_LABELS =  r"D:\Maor\X-ray2CTPA\data\validation_xray_ecg_full_props_PE_data_split_filtered.csv"
 
 GEN_TRAIN_LABELS = "labels_csv/cross_validation_ct_generation/fold0/y_train.csv"
 GEN_TEST_LABELS =  "labels_csv/cross_validation_ct_generation/fold0/y_test.csv"

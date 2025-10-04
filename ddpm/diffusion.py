@@ -1,6 +1,8 @@
 "Largely taken and adapted from https://github.com/lucidrains/video-diffusion-pytorch"
 import math
 import copy
+import os
+
 import torch
 import time
 from more_itertools import unzip
@@ -44,7 +46,7 @@ from generative.losses import PatchAdversarialLoss, PerceptualLoss
 from generative.networks.nets import PatchDiscriminator
 from params import *
 from ddpm.classifier import latent_network
-from ddpm.lora import inject_trainable_lora
+from ddpm.lora import inject_trainable_lora, save_lora_weight
 import logging
 
 log = logging.getLogger(__name__)
@@ -54,12 +56,13 @@ def timer(start, end, msg='', log=print):
     hours, rem = divmod(end - start, 3600)
     minutes, seconds = divmod(rem, 60)
     if LOG_TIME:
-        log(f"{msg}-"+"{:0>2}:{:0>2}:{:05.2f}".format(int(hours), int(minutes), seconds))
+        log(f"{msg}-" + "{:0>2}:{:0>2}:{:05.2f}".format(int(hours), int(minutes), seconds))
+
 
 def binary_accuracy(y_pred, y_true):
     y_pred_labels = (y_pred > ACCURACY_THRESHOLD).int()
-    correct = (y_pred_labels[:,1] == y_true[:,1].int()).sum().item() # calc only the positive class accuracy
-    accuracy = correct / y_true[:,1].numel()
+    correct = (y_pred_labels[:, 1] == y_true[:, 1].int()).sum().item()  # calc only the positive class accuracy
+    accuracy = correct / y_true[:, 1].numel()
     return accuracy
 
     # _, y_pred_tags = torch.max(y_pred, dim=1)
@@ -67,6 +70,7 @@ def binary_accuracy(y_pred, y_true):
     # correct_results_sum = (y_pred_tags == y_test_tags).sum().float()
     # acc = correct_results_sum / y_test.shape[0]
     # acc = torch.round(acc * 100)
+
 
 # Function to convert a color image tensor to grayscale using PIL
 def to_grayscale(tensor):
@@ -90,7 +94,7 @@ def make_rgb(volume):
     """Tile a NumPy array to make sure it has 3 channels."""
     z, c, h, w = volume.shape
 
-    tiling_shape = [1]*(len(volume.shape))
+    tiling_shape = [1] * (len(volume.shape))
     tiling_shape[1] = 3
     np_vol = torch.tile(volume, tiling_shape)
     return np_vol
@@ -143,13 +147,14 @@ def is_list_str(x):
         return False
     return all([type(el) == str for el in x])
 
+
 # relative positional bias
 class RelativePositionBias(nn.Module):
     def __init__(
-        self,
-        heads=8,
-        num_buckets=32,
-        max_distance=128
+            self,
+            heads=8,
+            num_buckets=32,
+            max_distance=128
     ):
         super().__init__()
         self.num_buckets = num_buckets
@@ -169,8 +174,8 @@ class RelativePositionBias(nn.Module):
         is_small = n < max_exact
 
         val_if_large = max_exact + (
-            torch.log(n.float() / max_exact) / math.log(max_distance /
-                                                        max_exact) * (num_buckets - max_exact)
+                torch.log(n.float() / max_exact) / math.log(max_distance /
+                                                            max_exact) * (num_buckets - max_exact)
         ).long()
         val_if_large = torch.min(
             val_if_large, torch.full_like(val_if_large, num_buckets - 1))
@@ -186,6 +191,7 @@ class RelativePositionBias(nn.Module):
             rel_pos, num_buckets=self.num_buckets, max_distance=self.max_distance)
         values = self.relative_attention_bias(rp_bucket)
         return rearrange(values, 'i j h -> h i j')
+
 
 # small helper modules
 class EMA():
@@ -258,6 +264,7 @@ class PreNorm(nn.Module):
         x = self.norm(x)
         return self.fn(x, **kwargs)
 
+
 # building block modules
 class Block(nn.Module):
     def __init__(self, dim, dim_out, groups=8):
@@ -291,7 +298,6 @@ class ResnetBlock(nn.Module):
             dim, dim_out, 1) if dim != dim_out else nn.Identity()
 
     def forward(self, x, time_emb=None):
-
         scale_shift = None
         if exists(self.mlp):
             assert exists(time_emb), 'time emb must be passed in'
@@ -334,6 +340,7 @@ class SpatialLinearAttention(nn.Module):
         out = self.to_out(out)
         return rearrange(out, '(b f) c h w -> b c f h w', b=b)
 
+
 # attention along space and time
 class EinopsToAndFrom(nn.Module):
     def __init__(self, from_einops, to_einops, fn):
@@ -355,11 +362,11 @@ class EinopsToAndFrom(nn.Module):
 
 class Attention(nn.Module):
     def __init__(
-        self,
-        dim,
-        heads=4,
-        dim_head=32,
-        rotary_emb=None
+            self,
+            dim,
+            heads=4,
+            dim_head=32,
+            rotary_emb=None
     ):
         super().__init__()
         self.scale = dim_head ** -0.5
@@ -371,10 +378,10 @@ class Attention(nn.Module):
         self.to_out = nn.Linear(hidden_dim, dim, bias=False)
 
     def forward(
-        self,
-        x,
-        pos_bias=None,
-        focus_present_mask=None
+            self,
+            x,
+            pos_bias=None,
+            focus_present_mask=None
     ):
         n, device = x.shape[-2], x.device
 
@@ -433,25 +440,26 @@ class Attention(nn.Module):
         out = rearrange(out, '... h n d -> ... n (h d)')
         return self.to_out(out)
 
+
 # model
 class Unet3D(nn.Module):
     def __init__(
-        self,
-        dim,
-        cond_dim=None,
-        out_dim=None,
-        dim_mults=(1, 2, 4, 8),
-        channels=3,
-        attn_heads=8,
-        attn_dim_head=32,
-        use_bert_text_cond=False,
-        init_dim=None,
-        init_kernel_size=7,
-        use_sparse_linear_attn=True,
-        block_type='resnet',
-        resnet_groups=8,
-        medclip = True,
-        classifier_free_guidance = False
+            self,
+            dim,
+            cond_dim=None,
+            out_dim=None,
+            dim_mults=(1, 2, 4, 8),
+            channels=3,
+            attn_heads=8,
+            attn_dim_head=32,
+            use_bert_text_cond=False,
+            init_dim=None,
+            init_kernel_size=7,
+            use_sparse_linear_attn=True,
+            block_type='resnet',
+            resnet_groups=8,
+            medclip=True,
+            classifier_free_guidance=False
     ):
         super().__init__()
         self.channels = channels
@@ -460,10 +468,11 @@ class Unet3D(nn.Module):
         self.cfg = classifier_free_guidance
 
         # temporal attention and its relative positional encoding
-        rotary_emb = RotaryEmbedding(min(32, attn_dim_head)) # 32
+        rotary_emb = RotaryEmbedding(min(32, attn_dim_head))  # 32
 
-        def temporal_attn(dim): return EinopsToAndFrom('b c f h w', 'b (h w) f c', Attention(
-            dim, heads=attn_heads, dim_head=attn_dim_head, rotary_emb=rotary_emb))
+        def temporal_attn(dim):
+            return EinopsToAndFrom('b c f h w', 'b (h w) f c', Attention(
+                dim, heads=attn_heads, dim_head=attn_dim_head, rotary_emb=rotary_emb))
 
         # realistically will not be able to generate that many frames of video... yet
         self.time_rel_pos_bias = RelativePositionBias(
@@ -476,7 +485,7 @@ class Unet3D(nn.Module):
 
         init_padding = init_kernel_size // 2
         self.init_conv = nn.Conv3d(channels, init_dim, (1, init_kernel_size,
-                                   init_kernel_size), padding=(0, init_padding, init_padding))
+                                                        init_kernel_size), padding=(0, init_padding, init_padding))
 
         self.init_temporal_attn = Residual(
             PreNorm(init_dim, temporal_attn(init_dim)))
@@ -508,7 +517,6 @@ class Unet3D(nn.Module):
         # text conditioning
         self.has_cond = exists(cond_dim) or use_bert_text_cond
         cond_dim = BERT_MODEL_DIM if use_bert_text_cond else cond_dim
-
 
         self.null_cond_emb = nn.Parameter(
             torch.randn(1, cond_dim)) if self.has_cond else None
@@ -569,10 +577,10 @@ class Unet3D(nn.Module):
         )
 
     def forward_with_cond_scale(
-        self,
-        *args,
-        cond_scale=2.,
-        **kwargs
+            self,
+            *args,
+            cond_scale=2.,
+            **kwargs
     ):
         logits = self.forward(*args, null_cond_prob=0., **kwargs)
         if cond_scale == 1 or not self.has_cond:
@@ -582,14 +590,14 @@ class Unet3D(nn.Module):
         return null_logits + (logits - null_logits) * cond_scale
 
     def forward(
-        self,
-        x,
-        time,
-        cond=None,
-        null_cond_prob=0.,
-        focus_present_mask=None,
-        # probability at which a given batch sample will focus on the present (0. is all off, 1. is completely arrested attention across time)
-        prob_focus_present=0.
+            self,
+            x,
+            time,
+            cond=None,
+            null_cond_prob=0.,
+            focus_present_mask=None,
+            # probability at which a given batch sample will focus on the present (0. is all off, 1. is completely arrested attention across time)
+            prob_focus_present=0.
     ):
 
         assert not (self.has_cond and not exists(cond)
@@ -609,7 +617,7 @@ class Unet3D(nn.Module):
         t = self.time_mlp(time) if exists(self.time_mlp) else None
 
         if not self.medclip:
-            #self.fc_cond(cond.view(batch,-1)) if exists(self.fc_cond) else cond
+            # self.fc_cond(cond.view(batch,-1)) if exists(self.fc_cond) else cond
             pass
         # classifier free guidance
         if self.has_cond:
@@ -652,6 +660,7 @@ class Unet3D(nn.Module):
         x = torch.cat((x, r), dim=1)
         return self.final_conv(x)
 
+
 # gaussian diffusion trainer class
 def extract(a, t, x_shape):
     b, *_ = t.shape
@@ -671,6 +680,7 @@ def cosine_beta_schedule(timesteps, s=0.008):
     alphas_cumprod = alphas_cumprod / alphas_cumprod[0]
     betas = 1 - (alphas_cumprod[1:] / alphas_cumprod[:-1])
     return torch.clip(betas, 0, 0.9999)
+
 
 def enforce_zero_terminal_snr(betas):
     """
@@ -692,7 +702,7 @@ def enforce_zero_terminal_snr(betas):
 
     # Scale so the first timestep is back to the old value.
     alphas_bar_sqrt *= alphas_bar_sqrt_0 / (
-        alphas_bar_sqrt_0 - alphas_bar_sqrt_T
+            alphas_bar_sqrt_0 - alphas_bar_sqrt_T
     )
 
     # Convert alphas_bar_sqrt to betas
@@ -703,35 +713,36 @@ def enforce_zero_terminal_snr(betas):
 
     return betas
 
+
 class GaussianDiffusion(nn.Module):
     def __init__(
-        self,
-        denoise_fn,
-        *,
-        image_size,
-        num_frames,
-        text_use_bert_cls=False,
-        img_cond = False,
-        img_cond_dim=0,
-        ecg_cond=False,
-        ecg_cond_dim=0,
-        channels=3,
-        timesteps=1000,
-        loss_type='l1',
-        use_dynamic_thres=False,  # from the Imagen paper
-        dynamic_thres_percentile=0.9,
-        vqgan_ckpt=None,
-        vae_ckpt=None,
-        medclip = True,
-        l1_weight = 1.0,
-        perceptual_weight = 1.0,
-        discriminator_weight = 0.0,
-        classification_weight = 1.0,
-        generator_weight= 1.0,
-        classifier_free_guidance = False,
-        name_dataset = 'RSPECT',
-        dataset_min_value = -5.1874175,
-        dataset_max_value = 5.1038833,
+            self,
+            denoise_fn,
+            *,
+            image_size,
+            num_frames,
+            text_use_bert_cls=False,
+            img_cond=False,
+            img_cond_dim=0,
+            ecg_cond=False,
+            ecg_cond_dim=0,
+            channels=3,
+            timesteps=1000,
+            loss_type='l1',
+            use_dynamic_thres=False,  # from the Imagen paper
+            dynamic_thres_percentile=0.9,
+            vqgan_ckpt=None,
+            vae_ckpt=None,
+            medclip=True,
+            l1_weight=1.0,
+            perceptual_weight=1.0,
+            discriminator_weight=0.0,
+            classification_weight=1.0,
+            generator_weight=1.0,
+            classifier_free_guidance=False,
+            name_dataset='RSPECT',
+            dataset_min_value=-5.1874175,
+            dataset_max_value=5.1038833,
     ):
         super().__init__()
         self.channels = channels
@@ -761,7 +772,6 @@ class GaussianDiffusion(nn.Module):
         self.img_cond = img_cond
         self.img_cond_dim = img_cond_dim
 
-
         # signal conditioning parameters
         self.ecg_cond = ecg_cond
         self.ecg_cond_dim = ecg_cond_dim
@@ -776,7 +786,8 @@ class GaussianDiffusion(nn.Module):
             self.vae.eval()
         if img_cond:
             if self.medclip:
-                model, preprocess = create_model_from_pretrained(('hf-hub:microsoft/BiomedCLIP-PubMedBERT_256-vit_base_patch16_224'))
+                model, preprocess = create_model_from_pretrained(
+                    ('hf-hub:microsoft/BiomedCLIP-PubMedBERT_256-vit_base_patch16_224'))
                 self.xray_encoder = model
             else:
                 from ddpm.ChestXRayModel import ChestXRayModel
@@ -800,7 +811,7 @@ class GaussianDiffusion(nn.Module):
                 elixr_model.eval()
                 self.xray_encoder = elixr_model
 
-                 # self.xray_encoder = CLIPVisionModel.from_pretrained('openai/clip-vit-large-patch14')
+                # self.xray_encoder = CLIPVisionModel.from_pretrained('openai/clip-vit-large-patch14')
         if ecg_cond:
             from ddpm.ECGModel import ECGCNNModel
             ecg_model = ECGCNNModel()
@@ -834,8 +845,9 @@ class GaussianDiffusion(nn.Module):
         self.loss_type = loss_type
 
         # register buffer helper function that casts float64 to float32
-        def register_buffer(name, val): return self.register_buffer(
-            name, val.to(torch.float32))
+        def register_buffer(name, val):
+            return self.register_buffer(
+                name, val.to(torch.float32))
 
         register_buffer('betas', betas)
         register_buffer('alphas_cumprod', alphas_cumprod)
@@ -854,7 +866,7 @@ class GaussianDiffusion(nn.Module):
 
         # calculations for posterior q(x_{t-1} | x_t, x_0)
         posterior_variance = betas * \
-            (1. - alphas_cumprod_prev) / (1. - alphas_cumprod)
+                             (1. - alphas_cumprod_prev) / (1. - alphas_cumprod)
 
         # above: equal to 1. / (1. / (1. - alpha_cumprod_tm1) + alpha_t / beta_t)
         register_buffer('posterior_variance', posterior_variance)
@@ -867,13 +879,13 @@ class GaussianDiffusion(nn.Module):
         register_buffer('posterior_mean_coef2', (1. - alphas_cumprod_prev)
                         * torch.sqrt(alphas) / (1. - alphas_cumprod))
 
-
         # dynamic thresholding when sampling
         self.use_dynamic_thres = use_dynamic_thres
         self.dynamic_thres_percentile = dynamic_thres_percentile
 
         # discriminator
-        self.netD = PatchDiscriminator(spatial_dims=3, num_layers_d=4, num_channels=32, in_channels=4, out_channels=1, kernel_size= 3)
+        self.netD = PatchDiscriminator(spatial_dims=3, num_layers_d=4, num_channels=32, in_channels=4, out_channels=1,
+                                       kernel_size=3)
         self.netD.cuda()
         self.adv_loss = PatchAdversarialLoss(criterion="least_squares")
         self.optimizerD = optim.Adam(params=self.netD.parameters(), lr=1e-4)
@@ -888,7 +900,7 @@ class GaussianDiffusion(nn.Module):
         # self.text_encoder = CLIPTextModel.from_pretrained('openai/clip-vit-large-patch14')
         # self.tokenizer = CLIPTokenizer.from_pretrained('openai/clip-vit-large-patch14')
 
-        #Load classification model
+        # Load classification model
         self.classifier = latent_network.LatentNetwork(
             num_classes=2,
             num_channels=channels,
@@ -912,14 +924,14 @@ class GaussianDiffusion(nn.Module):
 
     def predict_start_from_noise(self, x_t, t, noise):
         return (
-            extract(self.sqrt_recip_alphas_cumprod, t, x_t.shape) * x_t -
-            extract(self.sqrt_recipm1_alphas_cumprod, t, x_t.shape) * noise
+                extract(self.sqrt_recip_alphas_cumprod, t, x_t.shape) * x_t -
+                extract(self.sqrt_recipm1_alphas_cumprod, t, x_t.shape) * noise
         )
 
     def q_posterior(self, x_start, x_t, t):
         posterior_mean = (
-            extract(self.posterior_mean_coef1, t, x_t.shape) * x_start +
-            extract(self.posterior_mean_coef2, t, x_t.shape) * x_t
+                extract(self.posterior_mean_coef1, t, x_t.shape) * x_start +
+                extract(self.posterior_mean_coef2, t, x_t.shape) * x_t
         )
         posterior_variance = extract(self.posterior_variance, t, x_t.shape)
         posterior_log_variance_clipped = extract(
@@ -995,7 +1007,7 @@ class GaussianDiffusion(nn.Module):
                 cond = self.xray_encoder.encode_image(cxr.to(device), normalize=True)
                 cond = cond.to(device)
             else:
-                cond = self.xray_encoder(cxr.to(device))#[0]
+                cond = self.xray_encoder(cxr.to(device))  # [0]
                 # cond.to(device)
 
             if self.cfg:
@@ -1006,14 +1018,12 @@ class GaussianDiffusion(nn.Module):
 
         else:
             cond = cond.cuda()
-        breakpoint()
         if self.ecg_cond:
             cond = self.add_ecg_to_cond(cond, device, ecg)
 
         if isinstance(cond, list):
-            cond = cond[0]+F.pad(cond[1],(0, self.img_cond_dim - self.ecg_cond_dim))
+            cond = cond[0] + F.pad(cond[1], (0, self.img_cond_dim - self.ecg_cond_dim))
             cond = cond.cuda()
-        breakpoint()
         shape = (cond.shape[0], self.channels, self.num_frames, self.image_size, self.image_size)
         noisy = torch.randn(shape).to(device)
         timesteps = torch.full((shape[0],), self.num_timesteps - 1, dtype=torch.long).to(device)
@@ -1054,7 +1064,7 @@ class GaussianDiffusion(nn.Module):
                 cond = self.xray_encoder.encode_image(cxr.to(device), normalize=True)
                 cond = cond.to(device)
             else:
-                cond = self.xray_encoder(cxr.to(device))#[0]
+                cond = self.xray_encoder(cxr.to(device))  # [0]
                 # cond.to(device)
 
             if self.cfg:
@@ -1068,7 +1078,7 @@ class GaussianDiffusion(nn.Module):
         if self.ecg_cond:
             cond = self.add_ecg_to_cond(cond, device, ecg)
         if isinstance(cond, list):
-            cond = cond[0]+F.pad(cond[1],(0, self.img_cond_dim - self.ecg_cond_dim))
+            cond = cond[0] + F.pad(cond[1], (0, self.img_cond_dim - self.ecg_cond_dim))
             cond = cond.cuda()
         batch_size = cond.shape[0] if exists(cond) else batch_size
         image_size = self.image_size
@@ -1080,7 +1090,6 @@ class GaussianDiffusion(nn.Module):
         if self.classification_weight > 0:
             output = self.classifier(_sample)
             probs = F.softmax(output, dim=1)
-
 
         if isinstance(self.vqgan, VQGAN):
             # denormalize TODO: Remove eventually
@@ -1099,16 +1108,16 @@ class GaussianDiffusion(nn.Module):
             # if not return_latents:
             for i in range(_sample.shape[2]):
                 with torch.no_grad():
-                    slice = self.vae.decode(_sample[:,:,i,:,:], return_dict=False)[0]
+                    slice = self.vae.decode(_sample[:, :, i, :, :], return_dict=False)[0]
 
                 slice = (slice / 2 + 0.5).clamp(0, 1)
                 slice = slice.cpu().permute(0, 2, 3, 1).numpy()
                 slice = (slice * 255).round().astype("uint8")
                 slice = list(
-                        map(lambda _: Image.fromarray(_[:, :, 0]), slice)
-                        if slice.shape[3] == 1
-                        else map(lambda _: cv2.cvtColor(_, cv2.COLOR_BGR2GRAY), slice)
-                        )
+                    map(lambda _: Image.fromarray(_[:, :, 0]), slice)
+                    if slice.shape[3] == 1
+                    else map(lambda _: cv2.cvtColor(_, cv2.COLOR_BGR2GRAY), slice)
+                )
                 gray_slice = torch.from_numpy(np.stack(slice, axis=0))
                 slices.append(gray_slice.unsqueeze(1))
 
@@ -1141,18 +1150,19 @@ class GaussianDiffusion(nn.Module):
         noise = default(noise, lambda: torch.randn_like(x_start))
 
         return (
-            extract(self.sqrt_alphas_cumprod, t, x_start.shape) * x_start +
-            extract(self.sqrt_one_minus_alphas_cumprod,
-                    t, x_start.shape) * noise
+                extract(self.sqrt_alphas_cumprod, t, x_start.shape) * x_start +
+                extract(self.sqrt_one_minus_alphas_cumprod,
+                        t, x_start.shape) * noise
         )
-    def lpips_loss_fn(self, x_start,x_recon):
+
+    def lpips_loss_fn(self, x_start, x_recon):
 
         B, C, T, H, W = x_recon.shape
 
         # Selects one random 2D image from each 3D Image
         frame_idx = torch.randint(0, T, [B]).cuda()
         frame_idx_selected = frame_idx.reshape(-1,
-                                           1, 1, 1, 1).repeat(1, C, 1, H, W)
+                                               1, 1, 1, 1).repeat(1, C, 1, H, W)
         frames = torch.gather(x_start, 2, frame_idx_selected).squeeze(2)
         frames_recon = torch.gather(x_recon, 2, frame_idx_selected).squeeze(2)
 
@@ -1165,9 +1175,9 @@ class GaussianDiffusion(nn.Module):
 
         with torch.no_grad():
             frames_decoded = self.vae.decode(frames, return_dict=False)[0] if self.vae else frames
-            frames_recon_decoded = self.vae.decode(frames_recon, return_dict=False)[0] if self.vae else frames_recon               
+            frames_recon_decoded = self.vae.decode(frames_recon, return_dict=False)[0] if self.vae else frames_recon
 
-        # perceptual loss
+            # perceptual loss
         lpips_loss = self.perceptual_model(
             frames_recon_decoded.float(), frames_decoded.float()).mean() * self.perceptual_weight
         return lpips_loss
@@ -1195,7 +1205,7 @@ class GaussianDiffusion(nn.Module):
     #
     #     return loss_d
 
-    def disc_loss_fn(self, x_real,x_fake,step, warmup_steps,warmup_phase=False):
+    def disc_loss_fn(self, x_real, x_fake, step, warmup_steps, warmup_phase=False):
         gen_w = self.generator_weight * min(1.0, step / warmup_steps) if warmup_steps > 0 else 1.0
         disc_w = self.discriminator_weight * min(1.0, step / warmup_steps)
 
@@ -1212,7 +1222,7 @@ class GaussianDiffusion(nn.Module):
 
         # Discriminator update
         if not warmup_phase:
-            loss_d.backward(retain_graph=True) # Retain so generator can still backprop
+            loss_d.backward(retain_graph=True)  # Retain so generator can still backprop
             self.optimizerD.step()
 
         # === Generator loss for external use ===
@@ -1220,10 +1230,11 @@ class GaussianDiffusion(nn.Module):
         loss_g_real = self.adv_loss(logits_fake_for_gen, target_is_real=True, for_discriminator=False)
         loss_g = loss_g_real * gen_w
 
-        return loss_g ,loss_d
+        return loss_g, loss_d
 
-    def p_losses(self, x_start, t, cond=None, label=None, step=None, warmup_steps=None,hard_warmup = False, noise=None, **kwargs):
-        start=time.time()
+    def p_losses(self, x_start, t, cond=None, label=None, step=None, warmup_steps=None, hard_warmup=False, noise=None,
+                 **kwargs):
+        start = time.time()
         warmup_phase = hard_warmup & (step < warmup_steps)
         b, c, f, h, w, device = *x_start.shape, x_start.device
         noise = default(noise, lambda: torch.randn_like(x_start))
@@ -1242,24 +1253,24 @@ class GaussianDiffusion(nn.Module):
 
         if self.img_cond:
             if self.medclip:
-                cond =self.xray_encoder.encode_image(cxr.to(device), normalize=True)
+                cond = self.xray_encoder.encode_image(cxr.to(device), normalize=True)
                 cond = cond.to(device)
             else:
                 cond = self.xray_encoder(cxr.to(device))
                 # cond = cond.to(device)
         if self.cfg:
-            #TODO: fix to apply on 2 conds (cxr, ecg) currently only if cxr
+            # TODO: fix to apply on 2 conds (cxr, ecg) currently only if cxr
             random_n = torch.rand(1)
 
             text_label = False
             if random_n[0] > 0.5:
-                #Class label conditioning
+                # Class label conditioning
                 text = label
                 if text_label:
                     token = self.tokenizer(text, padding=True, return_tensors="pt")
                     label = self.text_encoder(**token.to(device))[0]
             else:
-                #No Class label conditioning
+                # No Class label conditioning
                 if text_label:
                     text = ["Unknown", "Unknown"]
                     token = self.tokenizer(text, padding=True, return_tensors="pt")
@@ -1269,22 +1280,20 @@ class GaussianDiffusion(nn.Module):
 
             cond = torch.cat((cond, label), dim=-1)
 
-
         if self.ecg_cond:
             cond = self.add_ecg_to_cond(cond, device, ecg)
 
         if isinstance(cond, list):
-            cond = cond[0]+F.pad(cond[1],(0, self.img_cond_dim - self.ecg_cond_dim))
+            cond = cond[0] + F.pad(cond[1], (0, self.img_cond_dim - self.ecg_cond_dim))
             cond = cond.cuda()
         pred_noise = self.denoise_fn(x_noisy, t, cond=cond, **kwargs)
         x_recon = self.predict_start_from_noise(x_noisy, t=t, noise=pred_noise)
         timer(start, time.time(), 'line 1283 before cls calc', log=log.info)
         start = time.time()
         # Classification loss
-        cls_loss, probs = 0 , 0
+        cls_loss, probs = 0, 0
         if self.classification_weight > 0:
             output = self.classifier(x_recon)
-            breakpoint()
             probs = F.softmax(output, dim=1)
             cls_loss = F.binary_cross_entropy_with_logits(output, label, pos_weight=self.pos_weight)
             cls_loss = cls_loss * self.classification_weight
@@ -1293,45 +1302,45 @@ class GaussianDiffusion(nn.Module):
         # Perceptual loss
         lpips_loss = 0
         if self.perceptual_weight > 0:
-            lpips_loss = self.lpips_loss_fn(x_start,x_recon)
+            lpips_loss = self.lpips_loss_fn(x_start, x_recon)
         timer(start, time.time(), 'line 1298 after lpips calc', log=log.info)
         start = time.time()
 
         # Discriminator loss
-        gen_loss, disc_loss = 0,0
+        gen_loss, disc_loss = 0, 0
         if self.discriminator_weight > 0:
-            gen_loss, disc_loss = self.disc_loss_fn(x_start,x_recon, step, warmup_steps,warmup_phase)
+            gen_loss, disc_loss = self.disc_loss_fn(x_start, x_recon, step, warmup_steps, warmup_phase)
         timer(start, time.time(), 'line 1305 after disc calc', log=log.info)
 
         l1_loss = F.l1_loss(noise, pred_noise)
         l1_loss_w = l1_loss
         if self.l1_weight > 0:
-            l1_loss_w = l1_loss* self.l1_weight
+            l1_loss_w = l1_loss * self.l1_weight
 
         if self.loss_type == 'l1':
             loss = l1_loss
         elif self.loss_type == 'l2':
             loss = F.mse_loss(noise, pred_noise)
-        elif self.loss_type =='l1_cls':
+        elif self.loss_type == 'l1_cls':
             loss = l1_loss_w + cls_loss
         elif self.loss_type == 'l1_lpips':
             loss = l1_loss_w + lpips_loss
         elif self.loss_type == 'l1_disc':
             loss = l1_loss_w + gen_loss if not warmup_phase else l1_loss_w
         elif self.loss_type == 'l1_lpips_disc':
-            loss = l1_loss_w + lpips_loss + gen_loss  if not warmup_phase else l1_loss_w + lpips_loss
+            loss = l1_loss_w + lpips_loss + gen_loss if not warmup_phase else l1_loss_w + lpips_loss
         elif self.loss_type == 'l1_cls_lpips':
             loss = l1_loss_w + lpips_loss + cls_loss
         elif self.loss_type == 'l1_cls_lpips_disc':
-            loss = l1_loss_w + lpips_loss + gen_loss + cls_loss  if not warmup_phase else l1_loss_w + lpips_loss + cls_loss
+            loss = l1_loss_w + lpips_loss + gen_loss + cls_loss if not warmup_phase else l1_loss_w + lpips_loss + cls_loss
         else:
             raise NotImplementedError()
 
         return {'total_loss': loss, 'l1_loss': l1_loss_w, 'lpips_loss': lpips_loss, 'disc_loss': disc_loss,
-                'gen_loss': gen_loss, 'cls_loss': cls_loss} , probs
+                'gen_loss': gen_loss, 'cls_loss': cls_loss}, probs
 
     def forward(self, x, *args, **kwargs):
-        start= time.time()
+        start = time.time()
         ct = x['ct'].cuda()
         cxr = x['cxr'].cuda() if 'cxr' in x else None
         ecg = x['ecg'].cuda() if 'ecg' in x else None
@@ -1342,8 +1351,8 @@ class GaussianDiffusion(nn.Module):
                     ct, quantize=False, include_embeddings=True)
                 # normalize to -1 and 1
                 ct = ((ct - self.vqgan.codebook.embeddings.min()) /
-                     (self.vqgan.codebook.embeddings.max() -
-                      self.vqgan.codebook.embeddings.min())) * 2.0 - 1.0
+                      (self.vqgan.codebook.embeddings.max() -
+                       self.vqgan.codebook.embeddings.min())) * 2.0 - 1.0
 
         elif isinstance(self.vae, AutoencoderKL):
             # normalize to -1 and 1
@@ -1359,21 +1368,26 @@ class GaussianDiffusion(nn.Module):
         check_shape(ct, 'b c f h w', c=self.channels,
                     f=self.num_frames, h=img_size, w=img_size)
         t = torch.randint(0, self.num_timesteps, (b,), device=device).long()
-        cond = [cxr,ecg] if ((cxr is not None) and (ecg is not None)) else cxr if cxr is not None else ecg
+        cond = [cxr, ecg] if ((cxr is not None) and (ecg is not None)) else cxr if cxr is not None else ecg
         # timer(start,time.time(),'line 1357 after load ct',log=log.info)
         start = time.time()
-        losses, probs =  self.p_losses(ct, t, cond=cond, label=label, *args, **kwargs)
+        losses, probs = self.p_losses(ct, t, cond=cond, label=label, *args, **kwargs)
         # timer(start, time.time(), 'line 1360 after calc losses', log=log.info)
         start = time.time()
         results = losses
         if self.classification_weight > 0:
             # label_one_hot = F.one_hot(label.view(-1), num_classes=2)
-            log.info(f"TRAIN LABEL: 0 -> {label[0][0].item()}, 1-> {label[0][1].item()} PREDICTION: 0 -> {probs[0][0].item()}, 1-> {probs[0][1].item()}")
+            try:
+                log.info(
+                    f"TRAIN LABEL: 1. {label[0][1].item()}, 2. {label[1][1].item()} PE PREDICTION: 1. {float(probs[0][1].item() > ACCURACY_THRESHOLD)}, 2. {float(probs[1][1].item() > ACCURACY_THRESHOLD)}")
+            except:
+                pass
             accuracy = binary_accuracy(probs, label)
             results.update({'cls_train_accuracy': accuracy})
         # timer(start, time.time(), msg="From starting forward till the ct load")
         # timer(start, time.time(), 'line 1368 after calc accuracy in forward', log=log.info)
         return results
+
 
 # trainer class
 CHANNELS_TO_MODE = {
@@ -1396,6 +1410,7 @@ def seek_all_images(img, channels=3):
             break
         i += 1
 
+
 # tensor of shape (channels, frames, height, width) -> gif
 def video_tensor_to_gif(tensor, path, duration=120, loop=0, optimize=True):
     tensor = ((tensor - tensor.min()) / (tensor.max() - tensor.min())) * 1.0
@@ -1404,6 +1419,7 @@ def video_tensor_to_gif(tensor, path, duration=120, loop=0, optimize=True):
     first_img.save(path, save_all=True, append_images=rest_imgs,
                    duration=duration, loop=loop, optimize=optimize)
     return images
+
 
 # gif -> (channels, frame, height, width) tensor
 def gif_to_tensor(path, channels=3, transform=T.ToTensor()):
@@ -1438,14 +1454,14 @@ def cast_num_frames(t, *, frames):
 
 class Dataset(data.Dataset):
     def __init__(
-        self,
-        folder,
-        image_size,
-        channels=3,
-        num_frames=16,
-        horizontal_flip=False,
-        force_num_frames=True,
-        exts=['gif']
+            self,
+            folder,
+            image_size,
+            channels=3,
+            num_frames=16,
+            horizontal_flip=False,
+            force_num_frames=True,
+            exts=['gif']
     ):
         super().__init__()
         self.folder = folder
@@ -1472,72 +1488,40 @@ class Dataset(data.Dataset):
         tensor = gif_to_tensor(path, self.channels, transform=self.transform)
         return self.cast_num_frames_fn(tensor)
 
-# trainer class
-
-
-class Trainer(object):
+class Launcher(object):
     def __init__(
-        self,
-        diffusion_model,
-        cfg,
-        folder=None,
-        dataset=None,
-        val_dataset=None,
-        *,
-        ema_decay=0.995,
-        num_frames=16,
-        train_batch_size=32,
-        train_lr=1e-4,
-        train_num_steps=100000,
-        gradient_accumulate_every=2,
-        amp=False,
-        step_start_ema=2000,
-        update_ema_every=10,
-        save_and_sample_every=1000,
-        results_folder='./results',
-        num_sample_rows=1,
-        max_grad_norm=None,
-        num_workers=20,
-        lora = True,
-        lora_first = False,
-        hard_warmup=False,
-        warmup_steps=5000
+            self,
+            diffusion_model,
+            cfg,
+            folder=None,
+            dataset=None,
+            batch_size=32,
+            results_folder='./results',
+            num_sample_rows=1,
+            num_workers=20,
+            lora=True,
+            lora_first=False,
     ):
         super().__init__()
         self.model = diffusion_model
-        self.ema = EMA(ema_decay)
         self.ema_model = copy.deepcopy(self.model)
-        self.update_ema_every = update_ema_every
 
-        self.step_start_ema = step_start_ema
-        self.save_and_sample_every = save_and_sample_every
-
-        self.batch_size = train_batch_size
+        self.batch_size = batch_size
         self.image_size = diffusion_model.image_size
-        self.gradient_accumulate_every = gradient_accumulate_every
-        self.train_num_steps = train_num_steps
         self.lora = lora
         self.lora_first = lora_first
-        self.warmup_steps=warmup_steps
-        self.hard_warmup= hard_warmup
 
-        image_size = diffusion_model.image_size
         channels = diffusion_model.channels
         num_frames = diffusion_model.num_frames
 
         self.cfg = cfg
         if dataset:
             self.ds = dataset
-        if val_dataset:
-            self.val_ds = val_dataset
-            val_dl = DataLoader(self.val_ds, batch_size=train_batch_size,
-                        shuffle=True, pin_memory=True, num_workers=num_workers, prefetch_factor=1)
-            self.val_dl = cycle(val_dl)
         else:
             assert folder is not None, 'Provide a folder path to the dataset'
-            self.ds = Dataset(folder, image_size,
+            self.ds = Dataset(folder, self.image_size,
                               channels=channels, num_frames=num_frames)
-        dl = DataLoader(self.ds, batch_size=train_batch_size,
+        dl = DataLoader(self.ds, batch_size=batch_size,
                         shuffle=True, pin_memory=True, num_workers=num_workers, prefetch_factor=1)
 
         self.len_dataloader = len(dl)
@@ -1546,6 +1530,109 @@ class Trainer(object):
         assert len(
             self.ds) > 0, 'need to have at least 1 video to start training (although 1 is not great, try 100k)'
 
+        self.num_sample_rows = num_sample_rows
+        self.results_folder = Path(results_folder)
+        self.results_folder.mkdir(exist_ok=True, parents=True)
+
+
+    def load(self, milestone, map_location=None, **kwargs):
+        get_milestone_path = lambda milestone: str(self.results_folder / f'model-{milestone}.pt')
+        if milestone == -1:
+            all_milestones = [int(p.stem.split('-')[-1])
+                              for p in Path(self.results_folder).glob('**/*.pt')]
+            assert len(
+                all_milestones) > 0, 'need to have at least one milestone to load from latest checkpoint (milestone == -1)'
+            milestone = max(all_milestones)
+
+        if map_location:
+            data = torch.load(get_milestone_path(milestone), map_location=map_location)
+        else:
+            data = torch.load(milestone, map_location=map_location)
+
+        # Add LoRA
+        if self.lora:
+            loras, ema_loras = None, None
+            if os.path.exists(self.results_folder / f'lora-{milestone}.pt'):
+                loras = str(self.results_folder / f'lora-{milestone}.pt')
+                ema_loras = str(self.results_folder / f'ema-lora-{milestone}.pt')
+            if self.lora_first:
+                self.model.load_state_dict(data['model'], strict=False, **kwargs)
+                self.ema_model.load_state_dict(data['ema'], strict=False, **kwargs)
+                self.model.eval()
+                self.ema_model.eval()
+                inject_trainable_lora(self.model.denoise_fn, loras=loras)
+                inject_trainable_lora(self.ema_model.denoise_fn, loras=ema_loras)
+            else:
+                self.model.eval()
+                self.ema_model.eval()
+                inject_trainable_lora(self.model.denoise_fn,
+                                      loras=loras)  # This will turn off all the gradients of the model, except for the trainable LoRA params.
+                inject_trainable_lora(self.ema_model.denoise_fn, loras=ema_loras)
+                self.model.load_state_dict(data['model'], strict=False, **kwargs)
+                self.ema_model.load_state_dict(data['ema'], strict=False, **kwargs)
+        else:
+            self.model.load_state_dict(data['model'], strict=True, **kwargs)
+            self.ema_model.load_state_dict(data['ema'], strict=True, **kwargs)
+
+
+# trainer class
+class Trainer(Launcher):
+    def __init__(
+            self,
+            diffusion_model,
+            cfg,
+            folder=None,
+            dataset=None,
+            val_dataset=None,
+            *,
+            ema_decay=0.995,
+            num_frames=16,
+            batch_size=32,
+            train_lr=1e-4,
+            train_num_steps=100000,
+            gradient_accumulate_every=2,
+            amp=False,
+            step_start_ema=2000,
+            update_ema_every=10,
+            save_and_sample_every=1000,
+            results_folder='./results',
+            num_sample_rows=1,
+            max_grad_norm=None,
+            num_workers=20,
+            lora=True,
+            lora_first=False,
+            hard_warmup=False,
+            warmup_steps=5000
+    ):
+        super().__init__(
+            diffusion_model,
+            cfg,
+            folder=folder,
+            dataset=dataset,
+            batch_size=batch_size,
+            results_folder=results_folder,
+            num_sample_rows=num_sample_rows,
+            num_workers=num_workers,
+            lora=lora,
+            lora_first=lora_first)
+        self.ema = EMA(ema_decay)
+        self.update_ema_every = update_ema_every
+        self.step_start_ema = step_start_ema
+        self.save_and_sample_every = save_and_sample_every
+        self.gradient_accumulate_every = gradient_accumulate_every
+        self.train_num_steps = train_num_steps
+        self.warmup_steps = warmup_steps
+        self.hard_warmup = hard_warmup
+
+        channels = diffusion_model.channels
+        num_frames = diffusion_model.num_frames
+
+        if val_dataset:
+            self.val_ds = val_dataset
+            val_dl = DataLoader(self.val_ds, batch_size=self.batch_size,
+                                shuffle=True, pin_memory=True, num_workers=num_workers, prefetch_factor=1)
+            self.val_dl = cycle(val_dl)
+
         self.opt = AdamW(diffusion_model.parameters(), lr=train_lr, weight_decay=train_lr)
 
         self.step = 0
@@ -1553,10 +1640,6 @@ class Trainer(object):
         self.amp = amp
         self.scaler = GradScaler('cuda', enabled=amp)
         self.max_grad_norm = max_grad_norm
-
-        self.num_sample_rows = num_sample_rows
-        self.results_folder = Path(results_folder)
-        self.results_folder.mkdir(exist_ok=True, parents=True)
 
         self.reset_parameters()
 
@@ -1570,13 +1653,15 @@ class Trainer(object):
         self.ema.update_model_average(self.ema_model, self.model)
 
     def save(self, milestone):
-        breakpoint()
         data = {
             'step': self.step,
             'model': self.model.state_dict(),
             'ema': self.ema_model.state_dict(),
             'scaler': self.scaler.state_dict()
         }
+        if self.lora:
+            save_lora_weight(self.model, str(self.results_folder / f'lora-{milestone}.pt'))
+            save_lora_weight(self.ema_model, str(self.results_folder / f'ema-lora-{milestone}.pt'))
         torch.save(data, str(self.results_folder / f'model-{milestone}.pt'))
 
     def load(self, milestone, map_location=None, **kwargs):
@@ -1591,28 +1676,33 @@ class Trainer(object):
         if map_location:
             data = torch.load(get_milestone_path(milestone), map_location=map_location)
         else:
-            data = torch.load(milestone)
+            data = torch.load(milestone, map_location=map_location)
 
         self.step = data['step']
         # Add LoRA
         if self.lora:
+            loras, ema_loras = None, None
+            if os.path.exists(self.results_folder / f'lora-{milestone}.pt'):
+                loras = str(self.results_folder / f'lora-{milestone}.pt')
+                ema_loras = str(self.results_folder / f'ema-lora-{milestone}.pt')
             if self.lora_first:
                 self.model.load_state_dict(data['model'], strict=False, **kwargs)
                 self.ema_model.load_state_dict(data['ema'], strict=False, **kwargs)
                 self.model.eval()
                 self.ema_model.eval()
-                inject_trainable_lora(self.model.denoise_fn)
-                inject_trainable_lora(self.ema_model.denoise_fn)
+                inject_trainable_lora(self.model.denoise_fn, loras=loras)
+                inject_trainable_lora(self.ema_model.denoise_fn, loras=ema_loras)
             else:
                 self.model.eval()
                 self.ema_model.eval()
-                inject_trainable_lora(self.model.denoise_fn)  # This will turn off all the gradients of the model, except for the trainable LoRA params.
-                inject_trainable_lora(self.ema_model.denoise_fn)
+                inject_trainable_lora(self.model.denoise_fn,
+                                      loras=loras)  # This will turn off all the gradients of the model, except for the trainable LoRA params.
+                inject_trainable_lora(self.ema_model.denoise_fn, loras=ema_loras)
                 self.model.load_state_dict(data['model'], strict=False, **kwargs)
                 self.ema_model.load_state_dict(data['ema'], strict=False, **kwargs)
         else:
-            self.model.load_state_dict(data['model'], strict=False, **kwargs)
-            self.ema_model.load_state_dict(data['ema'], strict=False, **kwargs)
+            self.model.load_state_dict(data['model'], strict=True, **kwargs)
+            self.ema_model.load_state_dict(data['ema'], strict=True, **kwargs)
         self.scaler.load_state_dict(data['scaler'])
 
     def train(
@@ -1622,8 +1712,8 @@ class Trainer(object):
             log_fn=log.info
     ):
         assert callable(log_fn)
-        train_acc=[]
-        val_acc=[]
+        train_acc = []
+        val_acc = []
         start = time.time()
         while self.step < self.train_num_steps:
             for i in range(self.gradient_accumulate_every):
@@ -1635,7 +1725,7 @@ class Trainer(object):
                     total_loss = self.model(
                         data,
                         step=self.step,
-                        warmup_steps= self.warmup_steps,
+                        warmup_steps=self.warmup_steps,
                         hard_warmup=self.hard_warmup,
                         prob_focus_present=prob_focus_present,
                         focus_present_mask=focus_present_mask
@@ -1645,19 +1735,18 @@ class Trainer(object):
                     loss = total_loss['total_loss']
 
                 self.scaler.scale(
-                        loss / self.gradient_accumulate_every).backward()
+                    loss / self.gradient_accumulate_every).backward()
             log = {l: total_loss[l].item() if torch.is_tensor(total_loss[l]) else total_loss[l] for l in total_loss}
             train_acc.append(log["cls_train_accuracy"])
             # if self.step % 100 == 0:
-            division = min(len(train_acc),50)
+            division = min(len(train_acc), 50)
             cls_train_total_accuracy = sum(train_acc[-division:]) / division
             # timer(start,time.time(), 'line 1647 after accuracy calc', log=log_fn)
             start = time.time()
 
-            log.update({"cls_train_total_accuracy":cls_train_total_accuracy})
+            log.update({"cls_train_total_accuracy": cls_train_total_accuracy})
 
             log.update({"step": self.step})
-
 
             # Max grad norm to limit gradient explosion
             if exists(self.max_grad_norm):
@@ -1695,8 +1784,11 @@ class Trainer(object):
                     if self.model.classification_weight > 0:
                         label = sampled_data['target']
                         # label_one_hot = F.one_hot(label.view(-1), num_classes=2)
-                        log_fn(
-                            f"VALIDATION LABEL: 0 -> {label[0][0].item()}, 1-> {label[0][1].item()} PREDICTION: 0 -> {probs[0][0].item()}, 1-> {probs[0][1].item()}")
+                        try:
+                            log_fn(
+                                f"VALIDATION LABEL: 1. {label[0][1].item()}, 2. {label[1][1].item()} PE PREDICTION: 1. {float(probs[0][1].item() > ACCURACY_THRESHOLD)}, 2. {float(probs[1][1].item() > ACCURACY_THRESHOLD)}")
+                        except:
+                            pass
                         accuracy = binary_accuracy(probs, label.cuda())
                         log = {**log, 'cls_val_accuracy': accuracy}
 
@@ -1744,61 +1836,40 @@ class Trainer(object):
         print('training completed')
 
 
-class Inferencer(object):
+class Inferencer(Launcher):
     def __init__(
             self,
-            diffusion_model_milestone,
-            map_location='cpu',
+            diffusion_model,
+            cfg,
             batch_size=1,
             folder=None,
             dataset=None,
             results_folder='./results',
             num_sample_rows=1,
             num_workers=20,
+            lora=False,
+            lora_first=False
     ):
-        super().__init__()
+        super().__init__(
+            diffusion_model,
+            cfg,
+            folder=folder,
+            dataset=dataset,
+            batch_size=batch_size,
+            results_folder=results_folder,
+            num_sample_rows=num_sample_rows,
+            num_workers=num_workers,
+            lora=lora,
+            lora_first=lora_first)
 
-        self.load(diffusion_model_milestone, map_location=map_location)
 
         # Use only ema model during Inference
         self.ema_model.eval()
 
-        if dataset:
-            self.ds = dataset
-
-        dl = DataLoader(self.ds, batch_size=batch_size, pin_memory=True, num_workers=num_workers, prefetch_factor=1)
-
-        self.len_dataloader = len(dl)
-        self.dl = cycle(dl)
-        print(f'found {len(self.ds)} videos as gif files at {folder}')
-        assert len(
-            self.ds) > 0, 'need to have at least 1 video to start training (although 1 is not great, try 100k)'
-        self.num_sample_rows = num_sample_rows
-        self.results_folder = Path(results_folder)
-        self.results_folder.mkdir(exist_ok=True, parents=True)
-
-    def load(self, milestone, map_location=None, **kwargs):
-        get_milestone_path = lambda milestone: str(self.results_folder / f'model-{milestone}.pt')
-        if milestone == -1:
-            all_milestones = [int(p.stem.split('-')[-1])
-                              for p in Path(self.results_folder).glob('**/*.pt')]
-            assert len(
-                all_milestones) > 0, 'need to have at least one milestone to load from latest checkpoint (milestone == -1)'
-            milestone = max(all_milestones)
-
-        if map_location:
-            data = torch.load(get_milestone_path(milestone), map_location=map_location)
-        else:
-            data = torch.load(milestone)
-
-        # self.model.load_state_dict(data['model'], strict=False, **kwargs)
-        self.ema_model.load_state_dict(data['ema'], strict=False, **kwargs)
-
-
     def generate(self,
-              result_file_name,
-              slices_to_extract: list[int],
-              log_fn=log.info):
+                 result_file_name,
+                 slices_to_extract: list[int],
+                 log_fn=log.info):
         assert callable(log_fn)
 
         with torch.no_grad():
@@ -1806,10 +1877,19 @@ class Inferencer(object):
             batches = num_to_groups(num_samples, self.batch_size)
 
             sampled_data = next(self.dl)
-            xrays = sampled_data['cxr']
-            all_videos_list = list(
-                map(lambda n: self.ema_model.sample(cond=xrays, batch_size=n), batches))
+            cxr = sampled_data['cxr'].cuda() if 'cxr' in sampled_data else None
+            ecg = sampled_data['ecg'].cuda() if 'ecg' in sampled_data else None
+            cond = [cxr, ecg] if ((cxr is not None) and (ecg is not None)) else cxr if cxr is not None else ecg
+            videos_probs = list(
+                map(lambda n: self.ema_model.sample(cond=cond, batch_size=n), batches))
+            all_videos_list, probs = zip(*videos_probs)
+            all_videos_list, probs = [all_videos_list[0]], probs[0]
             all_videos_list = torch.cat(all_videos_list, dim=0)
+            if self.model.classification_weight > 0:
+                label = sampled_data['target']
+                # label_one_hot = F.one_hot(label.view(-1), num_classes=2)
+                accuracy = binary_accuracy(probs, label.cuda())
+
 
         all_videos_list = F.pad(all_videos_list, (2, 2, 2, 2))
 
@@ -1846,10 +1926,13 @@ class Inferencer(object):
             extract_jpg(frame_idx)
 
     def predict(self):
-        x = next(self.dl)
-        cxr = x['cxr'].cuda() if 'cxr' in x else None
-        ecg = x['ecg'].cuda() if 'ecg' in x else None
-        cond = [cxr,ecg] if ((cxr is not None) and (ecg is not None)) else cxr if cxr is not None else ecg
-        self.ema_model. predict(cond)
+        for batch_idx, (x, target) in enumerate(self.dl):
+            cxr = x['cxr'].cuda() if 'cxr' in x else None
+            ecg = x['ecg'].cuda() if 'ecg' in x else None
+            cond = [cxr, ecg] if ((cxr is not None) and (ecg is not None)) else cxr if cxr is not None else ecg
+            probs = self.ema_model.predict(cond)
+            if self.model.classification_weight > 0:
+                label = x['target']
+                accuracy = binary_accuracy(probs, label.cuda())
 
 
