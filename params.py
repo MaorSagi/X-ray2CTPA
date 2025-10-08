@@ -10,10 +10,15 @@ DINO_IMAGE_SIZE = [128, 224, 224]
 AIR_HU_VAL = -1000.
 
 # Statistics for Hounsfield Units
-CONTRAST_HU_MIN = -100.     # Min value for loading contrast
-CONTRAST_HU_MAX = 900.      # Max value for loading contrast
-CONTRAST_HU_MEAN = 0.15897  # Mean voxel value after normalization and clipping
-CONTRAST_HU_STD = 0.19974   # Standard deviation of voxel values after normalization and clipping
+# CONTRAST_HU_MIN = -100.     # Min value for loading contrast
+# CONTRAST_HU_MAX = 900.      # Max value for loading contrast
+# CONTRAST_HU_MEAN = 0.15897  # Mean voxel value after normalization and clipping
+# CONTRAST_HU_STD = 0.19974   # Standard deviation of voxel values after normalization and clipping
+# Statistics for Hounsfield Units
+CONTRAST_HU_MIN = -200.  # Min value for loading contrast
+CONTRAST_HU_MAX = 500.  # Max value for loading contrast
+# Note: Observed HU range: -5075 25518, chosen -200 for 500 is good for PE detection generation task
+# percentile hu ct scan [0,5,25,50,75,95,98,99,100]: [-1024. -1024. -1002.  -901.    12.   152.   349.   540.  3071.]
 
 # Dataset parameters
 POS_WEIGHT = 0.13 # in the current cohort (CTPA -> 32%) #0.13

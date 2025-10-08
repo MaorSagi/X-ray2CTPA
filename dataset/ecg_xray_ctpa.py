@@ -280,7 +280,7 @@ class ECGXrayCTPADataset(data.Dataset):
         ecg = torch.from_numpy(np.load(self.ecgs + str(ecg_accession) + '.npy')).float()
         ecg = self.preprocess_ecg(ecg, ecg_accession)
 
-        if self.mode == "train" or self.mode == "test":
-            return {'ct': ctout, 'cxr': xray, 'ecg':ecg, 'target': label}
+        if self.mode == "train" or self.mode == "val":
+            return {'ct': ctout, 'cxr': xray, 'ecg':ecg, 'cxr_accession': cxr_accession, 'ecg_accession': ecg_accession, 'target': label}
         else: #if self.mode == "infer"
             return {'ct': ctout, 'cxr': xray, 'ecg':ecg, 'ct_accession': ct_accession, 'cxr_accession': cxr_accession, 'ecg_accession': ecg_accession}

@@ -26,7 +26,7 @@ denoising_fn: Unet3D
 train_lr: 1e-5 # 1e-4 unconditional 1e-5 conditional
 timesteps: 1000 # number of steps
 sampling_timesteps: 500 # number of sampling timesteps (using ddim for faster inference [see citation for ddim paper])
-loss_type: l1_cls_lpips_disc
+loss_type: l1_cls_lpips
 train_num_steps: 2000000 # total training steps
 gradient_accumulate_every: 5 # gradient accumulation steps
 ema_decay: 0.995 # exponential moving average decay

@@ -1102,7 +1102,11 @@ class GaussianDiffusion(nn.Module):
             slices = []
             gray_slice = []
             _sample = (((_sample + 1.0) / 2.0) * (self.max_val - self.min_val)) + self.min_val
-            _sample = 1 / 0.18215 * _sample
+            # back to VAE latent space
+            _sample = _sample / 0.18215
+
+            # Was in the old code but denormalize should be only after decode using VAE
+            # _sample = (((_sample + 1.0) / 2.0) * (self.max_val - self.min_val)) + self.min_val
             # return_latents = True
 
             # if not return_latents:
@@ -1110,16 +1114,21 @@ class GaussianDiffusion(nn.Module):
                 with torch.no_grad():
                     slice = self.vae.decode(_sample[:, :, i, :, :], return_dict=False)[0]
 
-                slice = (slice / 2 + 0.5).clamp(0, 1)
-                slice = slice.cpu().permute(0, 2, 3, 1).numpy()
-                slice = (slice * 255).round().astype("uint8")
-                slice = list(
-                    map(lambda _: Image.fromarray(_[:, :, 0]), slice)
-                    if slice.shape[3] == 1
-                    else map(lambda _: cv2.cvtColor(_, cv2.COLOR_BGR2GRAY), slice)
-                )
-                gray_slice = torch.from_numpy(np.stack(slice, axis=0))
-                slices.append(gray_slice.unsqueeze(1))
+            # Old code
+            slice = (slice / 2 + 0.5).clamp(0, 1)
+            slice = slice.cpu().permute(0, 2, 3, 1).numpy() # shape: [batch, H, W, C]
+            # [-1,1] -> [0,1] and rescale
+            # slice = (slice + 1) / 2
+            # slice = slice * (CONTRAST_HU_MAX - CONTRAST_HU_MIN) + CONTRAST_HU_MIN
+
+            slice = (slice * 255).round().astype("uint8")
+            slice = list(
+                map(lambda _: Image.fromarray(_[:, :, 0]), slice)
+                if slice.shape[3] == 1
+                else map(lambda _: cv2.cvtColor(_, cv2.COLOR_BGR2GRAY), slice)
+            )
+            gray_slice = torch.from_numpy(np.stack(slice, axis=0))
+            slices.append(gray_slice.unsqueeze(1))
 
             _sample = torch.cat(slices, dim=1).cuda()
             _sample = _sample.unsqueeze(1)
@@ -1934,5 +1943,5 @@ class Inferencer(Launcher):
             if self.model.classification_weight > 0:
                 label = x['target']
                 accuracy = binary_accuracy(probs, label.cuda())
-
+            self.results_folder
 
