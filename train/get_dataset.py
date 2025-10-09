@@ -13,27 +13,27 @@ def get_dataset(cfg):
         return train_dataset, val_dataset, sampler
     if cfg.dataset.name == 'XRAY_LIDC':
         train_dataset = XrayLIDCDataset(root_dir=cfg.dataset.root_dir, target=LIDC_TRAIN_LABELS, mode="train", augmentation=True)
-        val_dataset = XrayLIDCDataset(root_dir=cfg.dataset.root_dir, target=LIDC_TEST_LABELS, mode="test", augmentation=True)
+        val_dataset = XrayLIDCDataset(root_dir=cfg.dataset.root_dir, target=LIDC_TEST_LABELS, mode="val", augmentation=True)
         sampler = None
         return train_dataset, val_dataset, sampler
     if cfg.dataset.name == 'XRAY_CTPA':
         train_dataset = XrayCTPADataset(root=cfg.dataset.root_dir, target=TRAIN_LABELS, mode="train", augmentation=True)
-        val_dataset = XrayCTPADataset(root=cfg.dataset.root_dir, target=VALID_LABELS, mode="test", augmentation=True)
+        val_dataset = XrayCTPADataset(root=cfg.dataset.root_dir, target=VALID_LABELS, mode="val", augmentation=True)
         sampler = None
         return train_dataset, val_dataset, sampler
     if cfg.dataset.name == 'ECG_XRAY_CTPA':
         train_dataset = ECGXrayCTPADataset(root=cfg.dataset.root_dir, target=TRAIN_LABELS, mode="train", augmentation=True)
-        val_dataset = ECGXrayCTPADataset(root=cfg.dataset.root_dir, target=VALID_LABELS, mode="test", augmentation=True)
+        val_dataset = ECGXrayCTPADataset(root=cfg.dataset.root_dir, target=VALID_LABELS, mode="val", augmentation=True)
         sampler = None
         return train_dataset, val_dataset, sampler
     if cfg.dataset.name == 'CTPA':
         train_dataset = CTPADataset(root=cfg.dataset.root_dir, target=TRAIN_LABELS, mode="train", augmentation=True,img_cond_dim=cfg.model.img_cond_dim, ecg_cond_dim=cfg.model.ecg_cond_dim)
-        val_dataset = CTPADataset(root=cfg.dataset.root_dir, target=VALID_LABELS, mode="test", augmentation=True,img_cond_dim=cfg.model.img_cond_dim, ecg_cond_dim=cfg.model.ecg_cond_dim)
+        val_dataset = CTPADataset(root=cfg.dataset.root_dir, target=VALID_LABELS, mode="val", augmentation=True,img_cond_dim=cfg.model.img_cond_dim, ecg_cond_dim=cfg.model.ecg_cond_dim)
         sampler = None
         return train_dataset, val_dataset, sampler
     if cfg.dataset.name == 'RSPECT':
         train_dataset = RSPECTDataset(root_dir=cfg.dataset.root_dir, target=RSPECT_TRAIN_LABELS, mode="train", augmentation=True)
-        val_dataset = RSPECTDataset(root_dir=cfg.dataset.root_dir, target=RSPECT_VALID_LABELS, mode="test", augmentation=True)
+        val_dataset = RSPECTDataset(root_dir=cfg.dataset.root_dir, target=RSPECT_VALID_LABELS, mode="val", augmentation=True)
         sampler = None
         return train_dataset, val_dataset, sampler
     if cfg.dataset.name == 'DEFAULT':

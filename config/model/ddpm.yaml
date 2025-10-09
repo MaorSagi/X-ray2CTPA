@@ -1,4 +1,4 @@
-vqgan_ckpt: null 
+vqgan_ckpt: null
 vae_ckpt: "weights/vae-ft-mse-840000-ema-pruned.safetensors"
 
 # Have to be derived from 3D-VQGAN / 2D-VAE Latent space dimensions
@@ -19,14 +19,14 @@ cond_dim: 512 # 512, 256 total cond dim size
 batch_size: 2
 num_workers: 10
 logger: wandb
-objective: pred_x0
+#objective: pred_x0
 save_and_sample_every: 1000
 sampling_count: 5
 denoising_fn: Unet3D
 train_lr: 1e-5 # 1e-4 unconditional 1e-5 conditional
 timesteps: 1000 # number of steps
-sampling_timesteps: 500 # number of sampling timesteps (using ddim for faster inference [see citation for ddim paper])
-loss_type: l1_cls_lpips_disc
+#sampling_timesteps: 500 # number of sampling timesteps (using ddim for faster inference [see citation for ddim paper])
+loss_type: l1_cls_lpips
 train_num_steps: 2000000 # total training steps
 gradient_accumulate_every: 5 # gradient accumulation steps
 ema_decay: 0.995 # exponential moving average decay
@@ -50,8 +50,8 @@ medclip: False
 #dataset_max_value: 9.596558  # max value of the dataset for normalization
 
 name_dataset: ECG_XRAY_CTPA
-dataset_min_value: -8.749182 # min value of the dataset for normalization
-dataset_max_value: 8.710065  # max value of the dataset for normalization
+#dataset_min_value: -8.749182 # min value of the dataset for normalization
+#dataset_max_value: 8.710065  # max value of the dataset for normalization
 
 
 #The meaning of self.lora_first:

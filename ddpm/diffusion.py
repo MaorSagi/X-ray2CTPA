@@ -1041,6 +1041,7 @@ class GaussianDiffusion(nn.Module):
             cond = ecg_cond
 
         else:
+            # TODO: interpolation?
             cond = F.normalize(cond, p=2, dim=-1)
             ecg_cond = F.normalize(ecg_cond, p=2, dim=-1)
             cond += ecg_cond
@@ -1101,8 +1102,12 @@ class GaussianDiffusion(nn.Module):
         elif isinstance(self.vae, AutoencoderKL):
             slices = []
             gray_slice = []
+            # Was in the old code but denormalize should be only after decode using VAE
             _sample = (((_sample + 1.0) / 2.0) * (self.max_val - self.min_val)) + self.min_val
-            _sample = 1 / 0.18215 * _sample
+            # back to VAE latent space
+            _sample = _sample / 0.18215
+
+
             # return_latents = True
 
             # if not return_latents:
@@ -1110,8 +1115,13 @@ class GaussianDiffusion(nn.Module):
                 with torch.no_grad():
                     slice = self.vae.decode(_sample[:, :, i, :, :], return_dict=False)[0]
 
+                # Old code
                 slice = (slice / 2 + 0.5).clamp(0, 1)
-                slice = slice.cpu().permute(0, 2, 3, 1).numpy()
+                slice = slice.cpu().permute(0, 2, 3, 1).numpy() # shape: [batch, H, W, C]
+                # [-1,1] -> [0,1] and rescale
+                # slice = (slice + 1) / 2
+                # slice = slice * (CONTRAST_HU_MAX - CONTRAST_HU_MIN) + CONTRAST_HU_MIN
+
                 slice = (slice * 255).round().astype("uint8")
                 slice = list(
                     map(lambda _: Image.fromarray(_[:, :, 0]), slice)
